@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gunita — Knowledge Explorer</title>
+
+    <!-- force-graph for 2D knowledge graph visualization -->
+    <script src="https://unpkg.com/force-graph"></script>
+
+    <!-- Marked.js for markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+    <!-- DOMPurify for XSS protection -->
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <!-- ─── Top Bar: Search + Mode Toggle ─── -->
+    <header id="topbar">
+        <form id="search-form" autocomplete="off">
+            <input
+                type="text"
+                id="search-input"
+                placeholder="Search notes... (keyword, semantic, or hybrid)"
+                spellcheck="false"
+            />
+            <div id="search-modes">
+                <label class="mode-radio">
+                    <input type="radio" name="mode" value="keyword" checked /> Keyword
+                </label>
+                <label class="mode-radio">
+                    <input type="radio" name="mode" value="semantic" /> Semantic
+                </label>
+                <label class="mode-radio">
+                    <input type="radio" name="mode" value="hybrid" /> Hybrid
+                </label>
+            </div>
+            <button type="submit" id="search-btn">🔍 Search</button>
+        </form>
+        <div id="topbar-actions">
+            <button id="theme-toggle" title="Toggle dark/light theme">🌓</button>
+            <span id="ws-status" title="WebSocket status">⚪</span>
+        </div>
+    </header>
+
+    <!-- ─── Main Content: Three-Panel Layout ─── -->
+    <div id="main">
+        <!-- Left Panel: Vault Tree -->
+        <aside id="tree-panel">
+            <div class="panel-header">
+                <span class="panel-title">📁 Vault</span>
+                <button id="new-note-btn" class="panel-action-btn" title="Create new note">＋</button>
+            </div>
+            <div id="tree-container"></div>
+        </aside>
+
+        <!-- Resizer: Tree ↔ Graph -->
+        <div class="resizer" id="resizer-left" title="Drag to resize"></div>
+
+        <!-- Center Panel: Knowledge Graph -->
+        <section id="graph-panel">
+            <div id="graph-container"></div>
+            <!-- Graph Export Buttons -->
+            <div id="graph-export">
+                <button id="export-png" class="export-btn" title="Export graph as PNG">📷 PNG</button>
+                <button id="export-svg" class="export-btn" title="Export graph as SVG">🖼️ SVG</button>
+            </div>
+            <!-- Graph Filters -->
+            <div id="graph-filters">
+                <div class="graph-filter-section">
+                    <label class="graph-filter-label" id="rel-filter-toggle">
+                        <span>Edge Filter</span>
+                        <span class="filter-toggle-arrow">▶</span>
+                    </label>
+                    <div id="rel-filter-list" class="graph-filter-list" style="display:none"></div>
+                </div>
+                <div class="graph-filter-section">
+                    <label class="graph-filter-label" id="tag-filter-toggle">
+                        <span>Tag Filter</span>
+                        <span class="filter-toggle-arrow">▶</span>
+                    </label>
+                    <div id="tag-filter-list" class="graph-filter-list" style="display:none">
+                        <select id="tag-filter-select">
+                            <option value="">All tags</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="graph-filter-section">
+                    <label class="graph-filter-label" id="cluster-toggle">
+                        <span>Cluster by Tag</span>
+                        <input type="checkbox" id="cluster-checkbox" class="filter-checkbox" />
+                    </label>
+                </div>
+            </div>
+            <!-- Graph Legend -->
+            <div id="graph-legend">
+                <div class="legend-header" id="legend-toggle">
+                    <strong>Legend</strong>
+                    <span class="legend-collapse-icon">▼</span>
+                </div>
+                <div class="legend-items">
+                    <div class="legend-item"><span class="legend-dot" style="background:#6B8DAD"></span> Link</div>
+                    <div class="legend-item"><span class="legend-dot" style="background:#AD6B6B"></span> Dependency</div>
+                    <div class="legend-item"><span class="legend-dot" style="background:#6BAD8D"></span> Structural</div>
+                    <div class="legend-item"><span class="legend-dot" style="background:#6BADAD"></span> Semantic</div>
+                    <div class="legend-item"><span class="legend-dot" style="background:#AD8D6B"></span> Causal</div>
+                    <div class="legend-item"><span class="legend-dot" style="background:#6B7280"></span> Temporal</div>
+                    <div class="legend-item"><span class="legend-dot" style="background:#A0A8B3"></span> Person</div>
+                    <div class="legend-item"><span class="legend-dot" style="background:#6B7280"></span> Other</div>
+                </div>
+            </div>
+            <!-- Graph empty state -->
+            <div id="graph-empty" class="graph-empty-state" style="display:none">
+                <div class="empty-icon">🕸️</div>
+                <div class="empty-title">No notes in graph</div>
+                <div class="empty-subtitle">Add notes to your vault to see the knowledge graph</div>
+            </div>
+        </section>
+
+        <!-- Resizer: Graph ↔ Preview -->
+        <div class="resizer" id="resizer-right" title="Drag to resize"></div>
+
+        <!-- Right Panel: Note Preview / Editor -->
+        <aside id="preview-panel">
+            <div class="panel-header">
+                <span class="panel-title">📝 Preview</span>
+                <div id="preview-actions" style="display:none">
+                    <button id="edit-note-btn" class="panel-action-btn" title="Edit note">✏️</button>
+                    <button id="version-history-btn" class="panel-action-btn" title="Version history">🕐</button>
+                </div>
+            </div>
+            <div id="preview-content">
+                <div id="preview-empty">
+                    <div class="empty-icon">📝</div>
+                    <div class="empty-title">Select a note to preview</div>
+                    <div class="empty-subtitle">Click a node in the graph or a file in the vault tree</div>
+                    <div class="empty-shortcut">Press <kbd>Ctrl</kbd>+<kbd>K</kbd> to search</div>
+                </div>
+                <div id="preview-note" style="display:none">
+                    <h2 id="preview-title"></h2>
+                    <div id="preview-path"></div>
+                    <div id="preview-tags"></div>
+                    <div id="preview-meta"></div>
+                    <hr />
+                    <div id="preview-body"></div>
+                </div>
+                <!-- Editor view (hidden by default) -->
+                <div id="preview-editor" style="display:none">
+                    <div class="editor-header">
+                        <input type="text" id="editor-title" placeholder="Note title..." />
+                        <input type="text" id="editor-tags" placeholder="Tags (comma-separated)..." />
+                    </div>
+                    <textarea id="editor-content" placeholder="Write your note in markdown..." spellcheck="false"></textarea>
+                    <div class="editor-footer">
+                        <button id="editor-save" class="editor-btn editor-btn-primary">💾 Save</button>
+                        <button id="editor-cancel" class="editor-btn">Cancel</button>
+                    </div>
+                </div>
+                <!-- Version history view (hidden by default) -->
+                <div id="preview-versions" style="display:none">
+                    <h3>Version History</h3>
+                    <div id="versions-list"></div>
+                    <div id="diff-view" style="display:none">
+                        <h4 id="diff-title"></h4>
+                        <div id="diff-content"></div>
+                    </div>
+                </div>
+                <!-- Timeline view (hidden by default) -->
+                <div id="preview-timeline" style="display:none">
+                    <h3>Relationship Timeline</h3>
+                    <div id="timeline-content"></div>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <!-- ─── Status Bar ─── -->
+    <footer id="statusbar">
+        <button id="reindex-btn" title="Reindex vault">🔄 Reindex</button>
+        <label class="embed-toggle" title="Generate vector embeddings during reindex">
+            <input type="checkbox" id="reindex-embed" />
+            <span>Embed</span>
+        </label>
+        <span id="stat-notes">Notes: —</span>
+        <span id="stat-rels">Rels: —</span>
+        <span id="stat-tags">Tags: —</span>
+        <span id="stat-files">Files: —</span>
+        <span id="stat-qdrant">Qdrant: ⚫</span>
+        <span id="stat-vectors">Vectors: —</span>
+        <span id="stat-last-reindex">Last: Never</span>
+    </footer>
+
+    <!-- ─── New Note Modal ─── -->
+    <div id="new-note-modal" class="modal" style="display:none">
+        <div class="modal-content">
+            <h3>Create New Note</h3>
+            <input type="text" id="new-note-title" placeholder="Note title" />
+            <textarea id="new-note-content" placeholder="Write your note in markdown..." rows="12" spellcheck="false"></textarea>
+            <input type="text" id="new-note-tags" placeholder="Tags (comma-separated, optional)" />
+            <div class="modal-actions">
+                <button id="new-note-create" class="editor-btn editor-btn-primary">Create</button>
+                <button id="new-note-cancel" class="editor-btn">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ─── Toast Container ─── -->
+    <div id="toast-container"></div>
+
+    <!-- ─── App Scripts ─── -->
+    <script src="/static/js/toast.js"></script>
+    <script src="/static/js/ws.js"></script>
+    <script src="/static/js/theme.js"></script>
+    <script src="/static/js/tree.js"></script>
+    <script src="/static/js/graph.js"></script>
+    <script src="/static/js/search.js"></script>
+    <script src="/static/js/preview.js"></script>
+    <script src="/static/js/editor.js"></script>
+    <script src="/static/js/stats.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

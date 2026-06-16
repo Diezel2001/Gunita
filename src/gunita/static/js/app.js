@@ -9,8 +9,12 @@
      * Called when a graph node is clicked.
      * Loads the note into the preview panel.
      */
-    function handleNodeClick(noteId) {
-        PreviewManager.loadNote(noteId);
+    function handleNodeClick(noteId, chunkContext) {
+        if (chunkContext && chunkContext.chunkId) {
+            PreviewManager.loadNote(noteId, { chunkId: chunkContext.chunkId });
+        } else {
+            PreviewManager.loadNote(noteId);
+        }
         // After loading, attach wiki link handlers
         setTimeout(() => {
             PreviewManager.attachWikiLinkHandlers();
@@ -33,14 +37,24 @@
      * Called when a search result is clicked.
      * Shows the note in preview and highlights it in the graph.
      */
-    function handleSearchResultSelect(noteId) {
-        PreviewManager.loadNote(noteId);
+    function handleSearchResultSelect(noteId, chunkContext) {
+        if (chunkContext && chunkContext.chunkId) {
+            PreviewManager.loadNote(noteId, { chunkId: chunkContext.chunkId });
+            // Focus and mark the chunk on the graph node
+            GraphManager.clearHighlights();
+            GraphManager.highlightMatches(new Set([noteId]));
+            if (typeof GraphManager.focusNodeChunk === 'function') {
+                GraphManager.focusNodeChunk(noteId, chunkContext.chunkId);
+            }
+        } else {
+            PreviewManager.loadNote(noteId);
+            GraphManager.clearHighlights();
+            GraphManager.highlightMatches(new Set([noteId]));
+        }
         // Attach wiki link handlers after loading
         setTimeout(() => {
             PreviewManager.attachWikiLinkHandlers();
         }, 100);
-        GraphManager.clearHighlights();
-        GraphManager.highlightMatches(new Set([noteId]));
     }
 
     /**
@@ -48,6 +62,7 @@
      * Ctrl/Cmd+K → focus search input.
      * Ctrl/Cmd+N → new note.
      * Ctrl/Cmd+E → edit current note.
+     * L (not in input) → toggle graph labels.
      * Escape → close modals/cancel edit.
      */
     function initKeyboardShortcuts() {
@@ -75,6 +90,19 @@
                 if (actions && actions.style.display !== 'none') {
                     const editBtn = document.getElementById('edit-note-btn');
                     if (editBtn) editBtn.click();
+                }
+            }
+            // L key — toggle graph node labels (when not in an input/textarea)
+            if (e.key === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                const active = document.activeElement;
+                const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+                if (!isInput) {
+                    e.preventDefault();
+                    const labelCheckbox = document.getElementById('label-checkbox');
+                    if (labelCheckbox) {
+                        labelCheckbox.checked = !labelCheckbox.checked;
+                        labelCheckbox.dispatchEvent(new Event('change'));
+                    }
                 }
             }
         });
@@ -236,8 +264,9 @@
         PreviewManager.init();
         StatsManager.init();
 
-        // Initialize editor module
+        // Initialize editor module and quick-add bindings
         EditorManager.init();
+        EditorManager.bindQuickAddHandlers();
 
         // Initialize WebSocket for live updates
         WsManager.init({

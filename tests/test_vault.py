@@ -47,20 +47,16 @@ class TestEnsureVault:
         """ensure_vault should create vault root and all subdirectories."""
         with tempfile.TemporaryDirectory() as tmpdir:
             vault_path = Path(tmpdir) / "test_vault"
-            os.environ["BFAI_VAULT_PATH"] = str(vault_path)
-            try:
-                result = ensure_vault()
+            result = ensure_vault(vault_path=vault_path)
 
-                assert result == vault_path
-                assert vault_path.exists()
-                assert vault_path.is_dir()
+            assert result == vault_path
+            assert vault_path.exists()
+            assert vault_path.is_dir()
 
-                for subdir in VAULT_SUBDIRS:
-                    subdir_path = vault_path / subdir
-                    assert subdir_path.exists(), f"Subdirectory {subdir} was not created"
-                    assert subdir_path.is_dir()
-            finally:
-                del os.environ["BFAI_VAULT_PATH"]
+            for subdir in VAULT_SUBDIRS:
+                subdir_path = vault_path / subdir
+                assert subdir_path.exists(), f"Subdirectory {subdir} was not created"
+                assert subdir_path.is_dir()
 
     def test_ensure_vault_idempotent(self):
         """Calling ensure_vault multiple times should not raise errors."""

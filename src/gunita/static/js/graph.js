@@ -17,6 +17,9 @@ const GraphManager = (() => {
     let _disabledRelTypes = new Set();
     let _selectedTag = '';
 
+    // Label visibility toggle
+    let _showLabels = true;
+
     // Node ID set for quick lookup
     let _nodeIdSet = new Set();
 
@@ -106,11 +109,28 @@ const GraphManager = (() => {
                 ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
                 ctx.fillStyle = node.color || '#6B7280';
                 ctx.fill();
-                // Hide labels when zoomed out
-                if (globalScale < 1.0) return;
+
+                // Show chunk count badge if the node has multiple chunks
+                if (node.chunk_count > 1) {
+                    const badgeR = 5;
+                    const badgeX = node.x + r * 0.7;
+                    const badgeY = node.y - r * 0.7;
+                    ctx.beginPath();
+                    ctx.arc(badgeX, badgeY, badgeR, 0, 2 * Math.PI, false);
+                    ctx.fillStyle = '#5B7B9A';
+                    ctx.fill();
+                    ctx.font = '7px Sans-Serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillStyle = '#E6E8EB';
+                    ctx.fillText(String(node.chunk_count), badgeX, badgeY);
+                }
+
+                // Hide labels when zoomed out OR labels toggled off
+                if (globalScale < 1.0 || !_showLabels) return;
 
                 // Draw label text
-                const fontSize = 12;
+                const fontSize = 8;
                 ctx.font = `${fontSize}px Sans-Serif`;
                 const textWidth = ctx.measureText(label).width;
                 const bckgDimensions = [textWidth, fontSize].map(n => n + fontSize * 0.4);
@@ -171,8 +191,8 @@ const GraphManager = (() => {
             });
 
         // Enable node drag
-        graph.d3Force('charge').strength(-120);
-        graph.d3Force('link').distance(120);
+        graph.d3Force('charge').strength(-180);
+        graph.d3Force('link').distance(180);
 
         // Initialize legend toggle
         initLegendToggle();
@@ -215,6 +235,7 @@ const GraphManager = (() => {
                 title: n.title,
                 tags: n.tags || [],
                 degree: n.degree || 0,
+                chunk_count: n.chunk_count || 0,
                 _isMatch: false,
             }));
 
@@ -280,9 +301,10 @@ const GraphManager = (() => {
             filteredNodes = _allNodes.filter(n => (n.tags || []).includes(_selectedTag));
         }
 
-        // Only show nodes that are either tag-filtered or connected by visible edges
+        // Only show nodes that are either tag-filtered or connected by visible edges.
+        // When no edges exist at all (disconnected graph), show all nodes as isolated dots.
         const finalNodes = filteredNodes.filter(n =>
-            visibleNodeIds.has(n.id) || _selectedTag
+            visibleNodeIds.size === 0 || visibleNodeIds.has(n.id) || _selectedTag
         );
 
         const finalNodeIds = new Set(finalNodes.map(n => n.id));
@@ -352,6 +374,33 @@ const GraphManager = (() => {
     }
 
     /**
+     * Focus on a specific node and mark it with a chunk to highlight.
+     */
+    function focusNodeChunk(nodeId, chunkId) {
+        const node = _allNodes.find(n => n.id === nodeId || n.note_id === nodeId);
+        if (node && node.x !== undefined) {
+            graph.centerAt(node.x, node.y, 1000);
+            graph.zoom(2.5, 1000);
+        }
+    }
+
+    /**
+     * Toggle label visibility on/off.
+     * The _showLabels variable is read directly by the render function
+     * on each animation frame, so no explicit re-render is needed.
+     */
+    function toggleLabels(show) {
+        _showLabels = show;
+    }
+
+    /**
+     * Get current label visibility state.
+     */
+    function areLabelsVisible() {
+        return _showLabels;
+    }
+
+    /**
      * Initialize legend collapse/expand toggle.
      */
     function initLegendToggle() {
@@ -407,6 +456,15 @@ const GraphManager = (() => {
         if (clusterCheckbox) {
             clusterCheckbox.addEventListener('change', () => {
                 applyFilters();
+            });
+        }
+
+        // Node label toggle
+        const labelCheckbox = document.getElementById('label-checkbox');
+        if (labelCheckbox) {
+            labelCheckbox.addEventListener('change', (e) => {
+                _showLabels = e.target.checked;
+                toggleLabels(_showLabels);
             });
         }
 
@@ -518,5 +576,9 @@ const GraphManager = (() => {
         return graph;
     }
 
-    return { init, loadGraph, highlightMatches, clearHighlights, focusNode, getNetwork, isLoading: () => _isLoading };
+    return {
+        init, loadGraph, highlightMatches, clearHighlights, focusNode,
+        focusNodeChunk, toggleLabels, areLabelsVisible,
+        getNetwork, isLoading: () => _isLoading,
+    };
 })();

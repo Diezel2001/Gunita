@@ -8,18 +8,19 @@ The database file is stored in the vault's ``metadata`` subdirectory.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bfai.models import Note
+from bfai.models import Note, Chunk
 from bfai.vault import get_vault
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -150,6 +151,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
         if current_version < 2:
             _migrate_v1_to_v2(conn)
+        if current_version < 3:
+            _migrate_v2_to_v3(conn)
 
     conn.commit()
     logger.debug("Schema is up to date (version %d)", current_version or SCHEMA_VERSION)
@@ -503,6 +506,145 @@ def process_wiki_links(
         len(stored),
     )
     return stored
+
+
+# ---------------------------------------------------------------------------
+# Tag-based relationship generation
+# ---------------------------------------------------------------------------
+
+
+def generate_tag_relationships(
+    conn: sqlite3.Connection,
+    *,
+    min_shared_tags: int = 1,
+) -> int:
+    """Generate ``RELATED_TO`` relationships between notes sharing tags.
+
+    For every pair of notes that share at least ``min_shared_tags`` tags,
+    a ``RELATED_TO`` relationship is created (or left intact if it already
+    exists).  Existing ``RELATED_TO`` relationships that no longer share
+    enough tags are removed.
+
+    Args:
+        conn: An open SQLite connection.
+        min_shared_tags: Minimum number of shared tags required to
+            create a relationship (default 1).
+
+    Returns:
+        The number of ``RELATED_TO`` relationships created or retained.
+    """
+    from collections import defaultdict
+
+    # Build tag → set of note_ids mapping
+    tag_notes: dict[str, set[str]] = defaultdict(set)
+    rows = conn.execute("SELECT note_id, tag FROM tags").fetchall()
+    for row in rows:
+        tag_notes[row["tag"]].add(row["note_id"])
+
+    # Build pairs of notes that share tags
+    pair_shared: dict[tuple[str, str], int] = defaultdict(int)
+    for _tag, note_ids in tag_notes.items():
+        sorted_ids = sorted(note_ids)
+        for i in range(len(sorted_ids)):
+            for j in range(i + 1, len(sorted_ids)):
+                pair_shared[(sorted_ids[i], sorted_ids[j])] += 1
+
+    # Filter to pairs meeting the threshold
+    new_pairs = {
+        pair: count
+        for pair, count in pair_shared.items()
+        if count >= min_shared_tags
+    }
+
+    # Remove existing RELATED_TO relationships that no longer qualify
+    existing = conn.execute(
+        """SELECT source_id, target_id FROM relationships
+           WHERE relationship_type = 'RELATED_TO'"""
+    ).fetchall()
+    existing_pairs = {(r["source_id"], r["target_id"]) for r in existing}
+
+    for src, tgt in existing_pairs:
+        pair = (min(src, tgt), max(src, tgt))
+        if pair not in new_pairs:
+            conn.execute(
+                """DELETE FROM relationships
+                   WHERE source_id = ? AND target_id = ?
+                     AND relationship_type = 'RELATED_TO'""",
+                (src, tgt),
+            )
+
+    # Insert new relationships
+    count = 0
+    for (src, tgt), _shared in new_pairs.items():
+        conn.execute(
+            """INSERT OR IGNORE INTO relationships
+                   (source_id, target_id, relationship_type)
+               VALUES (?, ?, 'RELATED_TO')""",
+            (src, tgt),
+        )
+        count += 1
+
+    conn.commit()
+    logger.debug(
+        "Generated %d RELATED_TO relationships from shared tags", count,
+    )
+    return count
+
+
+def resolve_all_wiki_links(conn: sqlite3.Connection) -> int:
+    """Resolve wiki links for ALL notes in the database.
+
+    This is a second-pass operation that should be called after all
+    notes have been upserted.  It re-processes wiki links for every
+    note, ensuring that cross-references between notes are captured
+    even when notes were originally indexed out of order.
+
+    Returns:
+        The total number of EXPLICIT_LINK relationships created.
+    """
+    notes = conn.execute(
+        "SELECT id, path FROM notes ORDER BY id"
+    ).fetchall()
+
+    total_created = 0
+    for note_row in notes:
+        note_id = note_row["id"]
+        note_path = note_row["path"]
+        if not note_path:
+            continue
+
+        try:
+            from bfai.loader import load_note
+            from bfai.parser import parse_note
+
+            file_path = Path(note_path)
+            if not file_path.is_file():
+                continue
+
+            note_obj = load_note(file_path)
+            parsed = parse_note(note_obj.content)
+            note_obj.title = parsed.title
+            note_obj.body = parsed.body
+            note_obj.metadata = parsed.metadata
+            note_obj.tags = parsed.tags
+            note_obj.wiki_links = parsed.wiki_links
+
+            note_obj.id = note_id
+            if note_obj.wiki_links:
+                stored = process_wiki_links(conn, note_obj)
+                total_created += len(stored)
+        except Exception as exc:
+            logger.debug(
+                "Failed to resolve wiki links for %s: %s", note_path, exc,
+            )
+
+    conn.commit()
+    logger.info(
+        "Resolved wiki links for %d notes, created %d EXPLICIT_LINK relationships",
+        len(notes),
+        total_created,
+    )
+    return total_created
 
 
 # ---------------------------------------------------------------------------
@@ -913,6 +1055,45 @@ def get_all_note_ids(conn: sqlite3.Connection) -> list[str]:
     return [row["id"] for row in rows]
 
 
+def cleanup_stale_notes(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Remove notes whose file no longer exists on disk.
+
+    Deletes the note record, its FTS entry, chunks, and relationships.
+    Returns (total_deleted, total_checked).
+
+    This is a data-cleanup operation — safe to run periodically.
+    """
+    import os
+    rows = conn.execute("SELECT id, path FROM notes").fetchall()
+    total_checked = len(rows)
+    total_deleted = 0
+
+    for row in rows:
+        note_id = row["id"]
+        path = row["path"]
+        if path and not os.path.isfile(path):
+            # Delete from FTS
+            conn.execute("DELETE FROM notes_fts WHERE note_id = ?", (note_id,))
+            # Delete chunks
+            conn.execute("DELETE FROM chunks_fts WHERE note_id = ?", (note_id,))
+            conn.execute("DELETE FROM chunks WHERE note_id = ?", (note_id,))
+            # Delete relationships (CASCADE handles this, but be explicit)
+            conn.execute("DELETE FROM relationships WHERE source_id = ? OR target_id = ?", (note_id, note_id))
+            # Delete tags
+            conn.execute("DELETE FROM tags WHERE note_id = ?", (note_id,))
+            # Delete the note itself
+            conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+            total_deleted += 1
+
+    conn.commit()
+    logger.info(
+        "Cleaned up %d stale notes out of %d total",
+        total_deleted,
+        total_checked,
+    )
+    return total_deleted, total_checked
+
+
 def delete_note_by_id(conn: sqlite3.Connection, note_id: str) -> bool:
     """Delete a note and all related data (cascades to tags and
     relationships).
@@ -993,6 +1174,11 @@ def rebuild_fts_index(
         )
     conn.commit()
     logger.debug("Rebuilt FTS index with %d note(s)", len(notes))
+
+
+# ---------------------------------------------------------------------------
+# FTS5 query sanitization
+# ---------------------------------------------------------------------------
 
 
 def _sanitize_fts5_query(query: str) -> str:
@@ -1227,3 +1413,132 @@ def ranked_search(
 
     scored.sort(key=lambda x: x["combined_score"], reverse=True)
     return scored[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Chunk-level FTS5 indexing (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+CHUNKS_SCHEMA_SQL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    chunk_id UNINDEXED,
+    note_id UNINDEXED,
+    heading_path,
+    text,
+    tokenize='porter unicode61'
+);
+
+CREATE TABLE IF NOT EXISTS chunks (
+    chunk_id TEXT PRIMARY KEY,
+    note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    section_heading TEXT,
+    heading_path TEXT,   -- JSON array of strings e.g. '["NLP", "Applications", "Text Classification"]'
+    text TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_note ON chunks(note_id);
+"""
+
+
+def _ensure_chunks_schema(conn: sqlite3.Connection) -> None:
+    """Create chunk-related tables if they do not exist.
+
+    Idempotent — safe to call multiple times.
+    """
+    conn.executescript(CHUNKS_SCHEMA_SQL)
+    conn.commit()
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Migrate schema from version 2 to 3.
+
+    Creates the ``chunks`` and ``chunks_fts`` tables.
+    Does NOT reindex existing notes here — the incremental reindex
+    loop will handle chunk indexing naturally during the next scan.
+    Reindexing here would set ``updated_at`` timestamps prematurely,
+    causing ``incremental_reindex()`` to skip all existing files.
+    """
+    _ensure_chunks_schema(conn)
+    logger.info("Migrated schema v2→v3: created chunks and chunks_fts tables")
+
+
+def index_chunk_fts(
+    conn: sqlite3.Connection,
+    chunk: Chunk,
+) -> None:
+    """Index a single chunk in chunks_fts and chunks table.
+
+    Args:
+        conn: An open SQLite connection.
+        chunk: The Chunk object to index.
+    """
+    conn.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (chunk.chunk_id,))
+    conn.execute(
+        "INSERT INTO chunks_fts (chunk_id, note_id, heading_path, text) VALUES (?, ?, ?, ?)",
+        (chunk.chunk_id, chunk.note_id, json.dumps(chunk.heading_path), chunk.text),
+    )
+    conn.execute(
+        """INSERT OR REPLACE INTO chunks
+           (chunk_id, note_id, section_heading, heading_path, text, chunk_index)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (chunk.chunk_id, chunk.note_id, chunk.section_heading,
+         json.dumps(chunk.heading_path), chunk.text, chunk.chunk_index),
+    )
+    conn.commit()
+
+
+def delete_chunk_fts(conn: sqlite3.Connection, note_id: str) -> None:
+    """Remove all chunks for a note from chunks_fts and chunks tables.
+
+    Args:
+        conn: An open SQLite connection.
+        note_id: The ID of the note whose chunks to remove.
+    """
+    conn.execute("DELETE FROM chunks_fts WHERE note_id = ?", (note_id,))
+    conn.execute("DELETE FROM chunks WHERE note_id = ?", (note_id,))
+    conn.commit()
+
+
+def chunk_search(
+    conn: sqlite3.Connection,
+    query: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Search at the chunk level using FTS5.
+
+    Args:
+        conn: An open SQLite connection.
+        query: The search query string (FTS5 query syntax supported).
+        limit: Maximum number of results to return (default 20).
+
+    Returns:
+        List of dicts with keys: chunk_id, note_id, note_title, title,
+        section_heading, heading_path, text, rank, snippet, ordered by
+        rank (BM25 relevance).
+    """
+    sanitized = _sanitize_fts5_query(query)
+    if not sanitized:
+        return []
+
+    rows = conn.execute(
+        """SELECT c.chunk_id,
+                   c.note_id,
+                   n.title AS note_title,
+                   n.path AS note_path,
+                   c.section_heading,
+                   c.heading_path,
+                   c.text,
+                   fts.rank,
+                   snippet(chunks_fts, 3, '<b>', '</b>', '...', 32) AS snippet
+              FROM chunks_fts fts
+              JOIN chunks c ON c.chunk_id = fts.chunk_id
+              JOIN notes n  ON n.id = c.note_id
+             WHERE chunks_fts MATCH ?
+             ORDER BY rank
+             LIMIT ?""",
+        (sanitized, limit),
+    ).fetchall()
+
+    return [dict(row) for row in rows]

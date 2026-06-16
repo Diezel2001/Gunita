@@ -1570,10 +1570,10 @@ class TestSearchNotes:
         assert results == []
 
     def test_search_empty_query(self, db_conn):
-        """Empty query should raise OperationalError."""
+        """Empty query should return empty list."""
         self._setup(db_conn)
-        with pytest.raises(sqlite3.OperationalError):
-            search_notes(db_conn, "")
+        results = search_notes(db_conn, "")
+        assert results == []
 
     def test_search_empty_index(self, db_conn):
         """Search on empty index should return empty list."""
@@ -1827,9 +1827,9 @@ class TestRankedSearch:
         assert abs(results[0]["recency_score"] - 0.7937) < 0.01
 
     def test_ranked_search_empty_query(self, db_conn):
-        """Empty query should raise OperationalError."""
-        with pytest.raises(sqlite3.OperationalError):
-            ranked_search(db_conn, "")
+        """Empty query should return empty list."""
+        results = ranked_search(db_conn, "")
+        assert results == []
 
     def test_ranked_search_empty_index(self, db_conn):
         """Searching empty index should return empty list."""

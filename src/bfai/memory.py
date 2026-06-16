@@ -30,6 +30,8 @@ from bfai.db import (
     get_note_by_title as db_get_note_by_title,
     expand_graph as db_expand_graph,
     get_note_by_id,
+    get_all_note_ids,
+    get_tags_for_note,
     init_db,
     get_backlinks as db_get_backlinks,
     get_related_notes as db_get_related_notes,
@@ -40,7 +42,13 @@ from bfai.db import (
     store_tags,
     delete_note_by_id,
     delete_note_fts,
+    store_relationship,
+    index_chunk_fts,
+    delete_chunk_fts,
+    chunk_search,
+    _ensure_chunks_schema,
 )
+import json
 import re
 from bfai.loader import load_note
 from bfai.models import Note, Chunk
@@ -52,6 +60,59 @@ from bfai.writer import update_note as writer_update_note
 from bfai.writer import delete_note as writer_delete_note
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Note Listing API
+# ---------------------------------------------------------------------------
+
+
+def list_notes(
+    limit: int = 100,
+    offset: int = 0,
+    include_tags: bool = True,
+) -> list[dict]:
+    """List all indexed notes with their titles, IDs, paths, and tags.
+
+    This is the primary discovery API for agents.  Agents call this to
+    enumerate what knowledge exists in the vault before deciding where
+    to write an observation.
+
+    Args:
+        limit: Maximum number of results to return (default 100).
+        offset: Number of results to skip (default 0).
+        include_tags: Whether to include tags in each result.  Set to
+            ``False`` to skip the per-note tag query for performance
+            (default ``True``).
+
+    Returns:
+        List of dicts, each with keys ``note_id``, ``title``, ``path``,
+        and (if ``include_tags`` is ``True``) ``tags``, ordered by note
+        ID.
+    """
+    conn = _get_connection()
+    try:
+        all_ids = get_all_note_ids(conn)
+        total = len(all_ids)
+        paginated = all_ids[offset:offset + limit]
+
+        results: list[dict] = []
+        for nid in paginated:
+            note = get_note_by_id(conn, nid)
+            if not note:
+                continue
+            entry: dict = {
+                "note_id": nid,
+                "title": note.get("title", "") or "",
+                "path": note.get("path", "") or "",
+            }
+            if include_tags:
+                entry["tags"] = get_tags_for_note(conn, nid)
+            results.append(entry)
+
+        return results
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -193,31 +254,131 @@ def retrieve(
           note that was originally matched by the search
         - ``hop_depth``: for graph expansions, the hop depth (1 or 2)
         - ``combined_score``: ranking score for the context item
+        - ``chunk_id``: the matched chunk's ID (when matched at chunk level)
+        - ``heading_path``: hierarchical heading breadcrumb (list of strings)
+        - ``snippet``: keyword search snippet with highlights (when from keyword search)
+        - ``text``: full chunk text content (when matched at chunk level)
     """
     conn = _get_connection()
     try:
-        # Step 1: Run the search (hybrid or keyword-only)
+        # Step 1: Search at chunk level for keyword matches
+        keyword_chunk_results = chunk_search(conn, query, limit=top_k)
+        semantic_chunk_results: list[dict] = []
+
+        # Step 2: Run semantic search at chunk level
         if hybrid:
             try:
-                search_results = hybrid_search(
+                semantic_chunk_results = _semantic_chunk_search(
                     query,
                     top_k=top_k,
                     provider_name=provider_name,
                 )
-                # Map hybrid results to the same schema as ranked_search
-                search_results = [
-                    {
-                        "note_id": r["note_id"],
-                        "title": r["title"],
-                        "path": r["path"],
-                        "combined_score": r.get("combined_score", 0.0),
-                    }
-                    for r in search_results
-                ]
             except Exception:
-                search_results = ranked_search(conn, query, limit=top_k)
-        else:
-            search_results = ranked_search(conn, query, limit=top_k)
+                logger.warning("Semantic search unavailable in retrieve, falling back to keyword-only")
+
+        # Step 3: Merge keyword and semantic chunk results by chunk_id
+        keyword_chunks: dict[str, dict] = {}
+        for cr in keyword_chunk_results:
+            heading_path_raw = cr.get("heading_path", "[]")
+            try:
+                heading_path = json.loads(heading_path_raw) if isinstance(heading_path_raw, str) else heading_path_raw
+            except (json.JSONDecodeError, TypeError):
+                heading_path = []
+            keyword_chunks[cr["chunk_id"]] = {
+                "note_id": cr["note_id"],
+                "title": cr["note_title"],
+                "path": cr.get("note_path", ""),
+                "source": "search",
+                "match_type": "keyword",
+                "chunk_id": cr["chunk_id"],
+                "snippet": cr.get("snippet", ""),
+                "text": cr["text"],
+                "heading_path": heading_path,
+                "combined_score": 0.0,  # Will be normalized below
+                "rank": cr.get("rank", 0),
+            }
+
+        semantic_chunks: dict[str, dict] = {}
+        for sr in semantic_chunk_results:
+            meta = sr.get("metadata", {})
+            heading_path = meta.get("heading_path", [])
+            chunk_id = sr.get("chunk_id", "")
+            if not chunk_id:
+                continue
+            semantic_chunks[chunk_id] = {
+                "note_id": sr["note_id"],
+                "title": sr.get("title", ""),
+                "path": meta.get("path", ""),
+                "source": "search",
+                "match_type": "semantic",
+                "chunk_id": chunk_id,
+                "snippet": "",
+                "text": meta.get("text", ""),
+                "heading_path": heading_path,
+                "combined_score": sr.get("score", 0.0),
+                "score": sr.get("score", 0.0),
+            }
+
+        # Merge: combine keyword and semantic results by chunk_id
+        all_chunk_ids = set(keyword_chunks.keys()) | set(semantic_chunks.keys())
+        merged_chunks: list[dict] = []
+
+        # Normalize keyword ranks to [0, 1]
+        if keyword_chunks:
+            ranks = [kc["rank"] for kc in keyword_chunks.values()]
+            min_rank = min(ranks) if ranks else 0
+            max_rank = max(ranks) if ranks else 0
+            for kc in keyword_chunks.values():
+                if max_rank > min_rank:
+                    kc["combined_score"] = (max_rank - kc["rank"]) / (max_rank - min_rank)
+                else:
+                    kc["combined_score"] = 1.0
+
+        # Normalize semantic scores to [0, 1]
+        if semantic_chunks:
+            scores = [sc["score"] for sc in semantic_chunks.values()]
+            max_score = max(scores) if scores else 1.0
+            for sc in semantic_chunks.values():
+                sc["combined_score"] = sc["score"] / max_score if max_score > 0 else 0.0
+
+        for cid in all_chunk_ids:
+            kc = keyword_chunks.get(cid)
+            sc = semantic_chunks.get(cid)
+
+            if kc and sc:
+                # Hybrid match: weighted average
+                combined = 0.3 * kc["combined_score"] + 0.7 * sc["combined_score"]
+                merged_chunks.append({
+                    "note_id": kc["note_id"],
+                    "title": kc["title"],
+                    "path": kc["path"],
+                    "source": "search",
+                    "match_type": "hybrid",
+                    "chunk_id": cid,
+                    "snippet": kc["snippet"],
+                    "text": kc["text"],
+                    "heading_path": kc["heading_path"] or sc["heading_path"],
+                    "combined_score": round(combined, 4),
+                })
+            elif kc:
+                merged_chunks.append({**kc, "combined_score": round(kc["combined_score"], 4), "match_type": "direct"})
+            else:
+                merged_chunks.append({
+                    "note_id": sc["note_id"],
+                    "title": sc["title"],
+                    "path": sc["path"],
+                    "source": "search",
+                    "match_type": "direct",
+                    "chunk_id": cid,
+                    "snippet": sc["snippet"],
+                    "text": sc["text"],
+                    "heading_path": sc["heading_path"],
+                    "combined_score": round(sc["combined_score"], 4),
+                })
+
+        # Sort by combined_score descending
+        merged_chunks.sort(key=lambda x: x["combined_score"], reverse=True)
+        search_results = merged_chunks[:top_k]
 
         if not search_results:
             return []
@@ -235,17 +396,21 @@ def retrieve(
                 "title": r["title"],
                 "path": r["path"],
                 "source": "search",
-                "match_type": "direct",
+                "match_type": r["match_type"],
                 "matched_note_id": note_id,
                 "combined_score": r.get("combined_score", 0.0),
+                "chunk_id": r.get("chunk_id", ""),
+                "heading_path": r.get("heading_path", []),
+                "snippet": r.get("snippet", ""),
+                "text": r.get("text", ""),
             })
 
-        # Step 2: Expand with backlinks and graph neighbors if requested
+        # Step 4: Expand with backlinks and graph neighbors if requested
         if include_backlinks:
             # Collect all matched note IDs for graph expansion
-            matched_ids = [r["note_id"] for r in search_results]
+            matched_ids = list(set(r["note_id"] for r in search_results))
 
-            # 2a: Expand with backlinks (incoming relationships)
+            # 4a: Expand with backlinks (incoming relationships)
             for r in search_results:
                 note_id = r["note_id"]
                 try:
@@ -267,7 +432,7 @@ def retrieve(
                             "combined_score": 0.0,
                         })
 
-            # 2b: Expand with multi-hop graph traversal
+            # 4b: Expand with multi-hop graph traversal
             if max_hops > 0:
                 try:
                     graph_results = db_expand_graph(
@@ -309,6 +474,50 @@ def retrieve(
         return context
     finally:
         conn.close()
+
+
+def _semantic_chunk_search(
+    query: str,
+    top_k: int = 10,
+    *,
+    provider_name: str | None = None,
+    vector_store: object | None = None,
+) -> list[dict]:
+    """Semantic search returning chunk-level results with full metadata.
+
+    Args:
+        query: The search query string.
+        top_k: Maximum number of results (default 10).
+        provider_name: Embedding provider name.
+        vector_store: Optional VectorStore instance.
+
+    Returns:
+        List of dicts with keys: note_id, chunk_id, score, title, metadata.
+    """
+    from bfai.embeddings import get_provider
+    from bfai.vectorstore import VectorStore
+
+    provider = get_provider(name=provider_name)
+    logger.info("Generating embedding for semantic chunk search query")
+    query_vector = provider.generate(query)
+
+    if vector_store is None:
+        vector_store = VectorStore(dimension=provider.embedding_dimension)
+
+    results = vector_store.search(query_vector, top_k=top_k)
+
+    chunk_results: list[dict] = []
+    for r in results:
+        meta = r.metadata or {}
+        chunk_results.append({
+            "note_id": meta.get("note_id", r.note_id),
+            "chunk_id": r.note_id,  # The point ID is the chunk_id
+            "score": r.score,
+            "title": meta.get("title", r.title),
+            "metadata": dict(meta),
+        })
+
+    return chunk_results
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +635,8 @@ def semantic_search(
 
     Returns:
         List of dicts with keys ``note_id``, ``score``, ``title``,
-        and optional ``metadata``, ordered by score descending.
+        ``chunk_id``, and ``metadata`` (which includes ``heading_path``,
+        ``text``, ``section_heading``), ordered by score descending.
 
     Raises:
         ImportError: If the embedding provider or Qdrant client is not
@@ -448,22 +658,20 @@ def semantic_search(
     logger.info("Searching vector store (top_k=%d, fetch=%d)", top_k, fetch_k)
     results = vector_store.search(query_vector, top_k=fetch_k)
 
-    # Deduplicate by note_id: keep the highest-scoring chunk per note
-    seen_notes: dict[str, dict] = {}
+    # Return all chunk-level results (no dedup by note_id) for rich context
+    chunk_results: list[dict] = []
     for r in results:
         meta = r.metadata or {}
-        # The actual note_id is in payload (r.note_id is the chunk point ID)
-        real_note_id = meta.get("note_id", r.note_id)
-        if real_note_id not in seen_notes:
-            seen_notes[real_note_id] = {
-                "note_id": real_note_id,
-                "score": r.score,
-                "title": meta.get("title", r.title),
-                "metadata": meta,
-            }
+        chunk_results.append({
+            "note_id": meta.get("note_id", r.note_id),
+            "chunk_id": r.note_id,  # The point ID is the chunk_id
+            "score": r.score,
+            "title": meta.get("title", r.title),
+            "metadata": dict(meta),
+        })
 
-    deduped = sorted(seen_notes.values(), key=lambda x: x["score"], reverse=True)
-    return deduped[:top_k]
+    chunk_results.sort(key=lambda x: x["score"], reverse=True)
+    return chunk_results[:top_k]
 
 
 # ---------------------------------------------------------------------------
@@ -648,9 +856,10 @@ def index_note(note: Note, process_tags: bool = True) -> str:
     This performs the full indexing pipeline:
     1. Upsert the note into the ``notes`` table
     2. Store the note in the FTS5 full-text index
-    3. Process wiki links into ``EXPLICIT_LINK`` relationships
-    4. Resolve any incoming wiki links from other notes
-    5. Store tags (if ``process_tags`` is True)
+    3. Chunk the note and index chunks into ``chunks_fts``
+    4. Process wiki links into ``EXPLICIT_LINK`` relationships
+    5. Resolve any incoming wiki links from other notes
+    6. Store tags (if ``process_tags`` is True)
 
     Args:
         note: The Note object to index. Must have ``id``, ``title``,
@@ -672,6 +881,14 @@ def index_note(note: Note, process_tags: bool = True) -> str:
         # Index into FTS5 — use the stored note_id (which may differ
         # from note.id when the path already existed in the database).
         index_note_fts(conn, note_id, note.title, note.body or note.content)
+
+        # Index chunks into chunks_fts
+        _ensure_chunks_schema(conn)
+        note.id = note_id
+        chunks = chunk_note(note)
+        delete_chunk_fts(conn, note_id)
+        for chunk in chunks:
+            index_chunk_fts(conn, chunk)
 
         # Process outgoing wiki links
         if note.wiki_links:
@@ -739,6 +956,15 @@ def _index_note_internal(note: Note, process_tags: bool = True) -> str:
     try:
         note_id = upsert_note(conn, note)
         index_note_fts(conn, note_id, note.title, note.body or note.content)
+
+        # Index chunks into chunks_fts
+        _ensure_chunks_schema(conn)
+        note.id = note_id
+        chunks = chunk_note(note)
+        delete_chunk_fts(conn, note_id)
+        for chunk in chunks:
+            index_chunk_fts(conn, chunk)
+
         if note.wiki_links:
             process_wiki_links(conn, note)
         _resolve_incoming_wiki_links(conn, note)
@@ -822,6 +1048,161 @@ def create(
     return {
         "note": note,
         "id": note_id,
+        "embedded": embedded,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Observe API — Append an observation to a note
+# ---------------------------------------------------------------------------
+
+
+def observe(
+    title: str,
+    observation: str,
+    *,
+    tags: list[str] | None = None,
+    source: str | None = None,
+    source_note_id: str | None = None,
+    auto_create: bool = True,
+    section_heading: str = "## Observations",
+    re_embed: bool = False,
+    provider_name: str | None = None,
+) -> dict:
+    """Append an observation to a note and re-index it.
+
+    This is the primary API for agents to record new knowledge into an
+    existing note.  The observation is appended under a configurable
+    section heading (default ``"## Observations"``).  The note is then
+    re-parsed, re-indexed, and optionally re-embedded.
+
+    Args:
+        title: Note title to append to (slugified to locate the file).
+        observation: Markdown content to append.
+        tags: Optional tags to add to the note.
+        source: Human-readable source label (e.g. ``"web_search"``,
+            ``"conversation"``).  If provided, appended as italic text
+            alongside the observation.
+        source_note_id: Optional ID of a source note to link via an
+            ``OBSERVED_FROM`` relationship.
+        auto_create: If ``True`` (default), create the note if it does
+            not already exist.
+        section_heading: Heading under which to group observations.
+            Defaults to ``"## Observations"``.
+        re_embed: Whether to regenerate vector embeddings after append
+            (default ``False``).
+        provider_name: Embedding provider name (for ``re_embed``).
+
+    Returns:
+        Dict with keys:
+        - ``note``: The updated :class:`~bfai.models.Note` object.
+        - ``id``: The note's database ID.
+        - ``appended``: ``True`` if content was appended.
+        - ``created``: ``True`` if the note was auto-created.
+        - ``version``: The new version number (from version history).
+        - ``embedded``: Whether embedding was stored/updated.
+
+    Raises:
+        FileNotFoundError: If the note does not exist and
+            ``auto_create`` is ``False``.
+        ValueError: If ``title`` is empty or ``observation`` is empty.
+    """
+    if not title or not title.strip():
+        raise ValueError("Note title must not be empty")
+    if not observation or not observation.strip():
+        raise ValueError("Observation content must not be empty")
+
+    note: Note | None = None
+    created = False
+
+    # Step 1: Try to load existing note by title
+    try:
+        note = writer_load_note_by_title(title)
+    except FileNotFoundError:
+        if not auto_create:
+            raise FileNotFoundError(
+                f"No note found with title '{title}' and auto_create=False"
+            )
+        # Auto-create the note with the observation as initial content
+        obs_content = f"# {title}\n\n{section_heading}\n\n{observation}\n"
+        note = writer_create_note(title, obs_content, exist_ok=True)
+        created = True
+
+    # Step 2: Append the observation content
+    source_fragment = f"*{source}* — " if source else ""
+    content_to_append = f"{source_fragment}{observation}"
+
+    from bfai.writer import append_note as writer_append_note
+    note = writer_append_note(note, content_to_append, section_heading=section_heading)
+    appended = True
+
+    # Step 3: Re-parse the note to extract wiki links, tags, entities
+    parsed = parse_note(note.content)
+    note.title = parsed.title or title
+    note.body = parsed.body
+    note.metadata = parsed.metadata
+    # Merge new tags with existing parsed tags
+    if tags:
+        note.tags = sorted(set(parsed.tags + tags))
+    else:
+        note.tags = parsed.tags
+    note.wiki_links = parsed.wiki_links
+    note.entities = parsed.entities
+
+    # Step 4: Re-index into SQLite + FTS
+    conn = _get_connection()
+    try:
+        note_id = upsert_note(conn, note)
+        index_note_fts(conn, note_id, note.title, note.body or note.content)
+
+        # Index chunks into chunks_fts
+        _ensure_chunks_schema(conn)
+        note.id = note_id
+        chunks = chunk_note(note)
+        delete_chunk_fts(conn, note_id)
+        for chunk in chunks:
+            index_chunk_fts(conn, chunk)
+
+        if note.wiki_links:
+            process_wiki_links(conn, note)
+        _resolve_incoming_wiki_links(conn, note)
+        if note.tags:
+            store_tags(conn, note_id, note.tags)
+
+        # Step 5: Create OBSERVED_FROM relationship if source_note_id given
+        if source_note_id:
+            try:
+                store_relationship(
+                    conn, note_id, source_note_id, "OBSERVED_FROM"
+                )
+            except ValueError:
+                logger.warning(
+                    "Could not create OBSERVED_FROM relationship: "
+                    "note_id=%s source_note_id=%s",
+                    note_id, source_note_id,
+                )
+    finally:
+        conn.close()
+
+    # Step 6: Optionally re-embed
+    embedded = False
+    if re_embed:
+        try:
+            _embed_note(note, provider_name=provider_name)
+            embedded = True
+        except Exception as exc:
+            logger.warning("Failed to re-embed note '%s': %s", title, exc)
+
+    logger.info(
+        "Observed: %s (id=%s, appended=%s, created=%s, embedded=%s)",
+        title, note_id, appended, created, embedded,
+    )
+    return {
+        "note": note,
+        "id": note_id,
+        "appended": appended,
+        "created": created,
+        "version": 0,  # version tracking is handled by the REST API layer
         "embedded": embedded,
     }
 
@@ -983,6 +1364,7 @@ def delete(
         # Step 2: Delete from FTS and database first
         if note_id:
             delete_note_fts(conn, note_id)
+            delete_chunk_fts(conn, note_id)
             db_deleted = delete_note_by_id(conn, note_id)
             result["db_deleted"] = db_deleted
 
@@ -1038,8 +1420,13 @@ def chunk_note(note: Note) -> list[Chunk]:
     Chunking strategy:
     1. Split the note into sections by markdown headings.
     2. Within each section, split by paragraphs (double newlines).
-    3. Each paragraph becomes a separate chunk with the section heading
-       prepended for context.
+    3. Each paragraph becomes a separate chunk with the full heading
+       breadcrumb path prepended for context.
+
+    The heading hierarchy is tracked using a stack: when a heading is
+    encountered, the stack is truncated to (level - 1) and the new
+    heading text is appended. The chunk text is then prefixed with
+    ``note.title > ... > parent > heading`` separated by `` > ``.
 
     Args:
         note: The note to chunk.
@@ -1055,20 +1442,61 @@ def chunk_note(note: Note) -> list[Chunk]:
     chunks: list[Chunk] = []
     chunk_index = 0
 
+    # Track heading hierarchy: stack of heading texts (without # marks)
+    heading_stack: list[str] = []
+
+    def _make_breadcrumbs() -> list[str]:
+        """Build the full breadcrumb path including the note title."""
+        return [note.title] + list(heading_stack) if note.title else list(heading_stack)
+
+    def _chunk_paragraphs(section_text: str, breadcrumbs: list[str], heading_line: str) -> None:
+        """Split section_text into paragraphs and append chunks."""
+        nonlocal chunk_index
+        paragraphs = _split_paragraphs(section_text)
+        for para in paragraphs:
+            chunk_text = f"{' > '.join(breadcrumbs)}\n\n{para.strip()}"
+            if chunk_text.strip():
+                chunks.append(Chunk(
+                    chunk_id=f"{note.id}_chunk_{chunk_index}",
+                    text=chunk_text,
+                    note_id=note.id,
+                    section_heading=heading_line,
+                    heading_path=list(breadcrumbs),
+                    chunk_index=chunk_index,
+                ))
+                chunk_index += 1
+
+    def _chunk_empty_section(breadcrumbs: list[str], heading_line: str) -> None:
+        """Handle sections with only a heading and no body text."""
+        nonlocal chunk_index
+        chunk_text = ' > '.join(breadcrumbs)
+        if chunk_text.strip():
+            chunks.append(Chunk(
+                chunk_id=f"{note.id}_chunk_{chunk_index}",
+                text=chunk_text,
+                note_id=note.id,
+                section_heading=heading_line,
+                heading_path=list(breadcrumbs),
+                chunk_index=chunk_index,
+            ))
+            chunk_index += 1
+
     # Find all heading positions
     headings = list(_HEADING_RE.finditer(text))
 
     if not headings:
         # No headings — treat entire text as one section
         paragraphs = _split_paragraphs(text)
+        breadcrumbs = [note.title] if note.title else []
         for para in paragraphs:
-            chunk_text = para.strip()
-            if chunk_text:
+            chunk_text = ' > '.join(breadcrumbs + [para.strip()]) if breadcrumbs else para.strip()
+            if chunk_text.strip():
                 chunks.append(Chunk(
                     chunk_id=f"{note.id}_chunk_{chunk_index}",
                     text=chunk_text,
                     note_id=note.id,
                     section_heading="",
+                    heading_path=list(breadcrumbs),
                     chunk_index=chunk_index,
                 ))
                 chunk_index += 1
@@ -1077,50 +1505,30 @@ def chunk_note(note: Note) -> list[Chunk]:
     # Process preamble (text before first heading)
     preamble = text[: headings[0].start()].strip()
     if preamble:
-        paragraphs = _split_paragraphs(preamble)
-        for para in paragraphs:
-            chunk_text = para.strip()
-            if chunk_text:
-                chunks.append(Chunk(
-                    chunk_id=f"{note.id}_chunk_{chunk_index}",
-                    text=chunk_text,
-                    note_id=note.id,
-                    section_heading="",
-                    chunk_index=chunk_index,
-                ))
-                chunk_index += 1
+        breadcrumbs = _make_breadcrumbs()
+        _chunk_paragraphs(preamble, breadcrumbs, "")
 
-    # Process each section
+    # Process each section, tracking heading hierarchy
     for i, heading_match in enumerate(headings):
-        heading_line = heading_match.group(0).strip()
+        heading_level = len(heading_match.group(1))  # Number of # characters
+        heading_text = heading_match.group(2).strip()  # Text without # marks
+        heading_line = heading_match.group(0).strip()  # Full heading line e.g. "### Title"
+
+        # Truncate stack to (level - 1) and append new heading
+        while len(heading_stack) >= heading_level:
+            heading_stack.pop()
+        heading_stack.append(heading_text)
+
+        breadcrumbs = _make_breadcrumbs()
+
         start = heading_match.end()
         end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
         section_text = text[start:end].strip()
 
         if not section_text:
-            # Empty section — just the heading
-            chunks.append(Chunk(
-                chunk_id=f"{note.id}_chunk_{chunk_index}",
-                text=heading_line,
-                note_id=note.id,
-                section_heading=heading_line,
-                chunk_index=chunk_index,
-            ))
-            chunk_index += 1
-            continue
-
-        paragraphs = _split_paragraphs(section_text)
-        for para in paragraphs:
-            chunk_text = f"{heading_line}\n\n{para.strip()}"
-            if chunk_text.strip():
-                chunks.append(Chunk(
-                    chunk_id=f"{note.id}_chunk_{chunk_index}",
-                    text=chunk_text,
-                    note_id=note.id,
-                    section_heading=heading_line,
-                    chunk_index=chunk_index,
-                ))
-                chunk_index += 1
+            _chunk_empty_section(breadcrumbs, heading_line)
+        else:
+            _chunk_paragraphs(section_text, breadcrumbs, heading_line)
 
     return chunks
 
@@ -1150,8 +1558,8 @@ def _embed_note(
     """Chunk a note, generate embeddings for each chunk, and store them.
 
     Each chunk is stored with a deterministic ID (``{note_id}_chunk_{index}``)
-    and a payload containing ``note_id``, ``title``, ``chunk_index``, and
-    ``section_heading``.
+    and a payload containing ``note_id``, ``title``, ``chunk_index``,
+    ``section_heading``, ``heading_path``, and ``text``.
 
     Args:
         note: The Note to embed.
@@ -1190,6 +1598,8 @@ def _embed_note(
             "title": note.title,
             "chunk_index": c.chunk_index,
             "section_heading": c.section_heading,
+            "heading_path": c.heading_path,
+            "text": c.text,
             "tags": note.tags,
         }
         for c in chunks
@@ -1286,6 +1696,14 @@ def reindex_all() -> int:
 
             # Index into FTS using the stored (preserved) ID
             index_note_fts(conn, stored_id, note.title, note.body or note.content)
+
+            # Index chunks into chunks_fts
+            _ensure_chunks_schema(conn)
+            note.id = stored_id
+            chunks = chunk_note(note)
+            delete_chunk_fts(conn, stored_id)
+            for chunk in chunks:
+                index_chunk_fts(conn, chunk)
 
             indexed += 1
 

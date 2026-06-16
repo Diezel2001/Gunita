@@ -443,5 +443,133 @@ const EditorManager = (() => {
         return div.innerHTML;
     }
 
-    return { init, startEditing, cancelEdit, loadVersionHistory, loadTimeline, showNewNoteModal };
+    // ─── Quick Add ────────────────────────────────────────────────
+
+    let _quickAddNoteId = null;
+
+    function showQuickAdd(noteId) {
+        _quickAddNoteId = noteId;
+        const section = document.getElementById('quick-add-section');
+        const input = document.getElementById('quick-add-input');
+        const btn = document.getElementById('quick-add-btn');
+        if (section) {
+            section.style.display = 'block';
+        }
+        if (btn) {
+            btn.style.display = 'none';
+        }
+        if (input) {
+            input.value = '';
+            input.focus();
+        }
+    }
+
+    function hideQuickAdd() {
+        const section = document.getElementById('quick-add-section');
+        const btn = document.getElementById('quick-add-btn');
+        if (section) {
+            section.style.display = 'none';
+        }
+        if (btn) {
+            btn.style.display = '';
+        }
+        _quickAddNoteId = null;
+    }
+
+    async function handleQuickAdd() {
+        const noteId = _quickAddNoteId;
+        const input = document.getElementById('quick-add-input');
+        const content = input ? input.value.trim() : '';
+
+        if (!noteId) {
+            if (typeof ToastManager !== 'undefined') {
+                ToastManager.show('No note selected', 'warning');
+            }
+            return;
+        }
+
+        if (!content) {
+            if (typeof ToastManager !== 'undefined') {
+                ToastManager.show('Please enter some content', 'warning');
+            }
+            return;
+        }
+
+        try {
+            const resp = await fetch(`/api/notes/${noteId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content }),
+            });
+
+            if (resp.ok) {
+                if (typeof ToastManager !== 'undefined') {
+                    ToastManager.show('Observation added', 'success');
+                }
+                hideQuickAdd();
+                // Reload preview and graph
+                if (typeof PreviewManager !== 'undefined') {
+                    PreviewManager.loadNote(noteId);
+                    setTimeout(() => PreviewManager.attachWikiLinkHandlers(), 100);
+                }
+                if (typeof GraphManager !== 'undefined') {
+                    GraphManager.loadGraph();
+                }
+                if (typeof TreeManager !== 'undefined') {
+                    TreeManager.loadTree();
+                }
+                if (typeof StatsManager !== 'undefined') {
+                    StatsManager.refreshStats();
+                }
+            } else {
+                const err = await resp.json();
+                if (typeof ToastManager !== 'undefined') {
+                    ToastManager.show(err.detail || 'Failed to add observation', 'error');
+                }
+            }
+        } catch (e) {
+            if (typeof ToastManager !== 'undefined') {
+                ToastManager.show('Failed to add observation', 'error');
+            }
+        }
+    }
+
+    // ─── Quick Add event binding (called after DOM ready) ──────────
+
+    function bindQuickAddHandlers() {
+        const submitBtn = document.getElementById('quick-add-submit');
+        const cancelBtn = document.getElementById('quick-add-cancel');
+        const input = document.getElementById('quick-add-input');
+
+        if (submitBtn) {
+            submitBtn.addEventListener('click', handleQuickAdd);
+        }
+        if (cancelBtn) {
+            cancelBtn.addEventListener('click', hideQuickAdd);
+        }
+        if (input) {
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    handleQuickAdd();
+                }
+                if (e.key === 'Escape') {
+                    hideQuickAdd();
+                }
+            });
+        }
+    }
+
+    return {
+        init,
+        startEditing,
+        cancelEdit,
+        loadVersionHistory,
+        loadTimeline,
+        showNewNoteModal,
+        showQuickAdd,
+        hideQuickAdd,
+        handleQuickAdd,
+        bindQuickAddHandlers,
+    };
 })();

@@ -135,7 +135,13 @@ const SearchManager = (() => {
             `;
             item.addEventListener('click', () => {
                 resultsContainer.style.display = 'none';
-                if (onResultSelect) onResultSelect(r.note_id);
+                if (onResultSelect) {
+                    // Pass chunk context if available
+                    const chunkContext = r.chunk_id
+                        ? { chunkId: r.chunk_id, headingPath: r.heading_path || [] }
+                        : null;
+                    onResultSelect(r.note_id, chunkContext);
+                }
             });
             resultsContainer.appendChild(item);
         }

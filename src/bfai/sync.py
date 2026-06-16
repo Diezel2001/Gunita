@@ -434,6 +434,8 @@ def incremental_reindex(
         store_tags,
         delete_note_by_id,
         delete_note_fts,
+        resolve_all_wiki_links,
+        generate_tag_relationships,
     )
     from bfai.loader import load_note
     from bfai.parser import parse_note
@@ -455,7 +457,9 @@ def incremental_reindex(
         # Get all existing note IDs from the database
         existing_ids = get_all_note_ids(conn)
 
-        # Check each markdown file in the vault
+        # ── Pass 1: Upsert all notes, store tags, index FTS ──
+        # Wiki links are NOT resolved here to avoid ordering issues
+        # (target note may not exist yet).  They are resolved in Pass 2.
         for filename, snap in current_files.items():
             if not filename.lower().endswith(".md"):
                 continue
@@ -495,8 +499,6 @@ def incremental_reindex(
                 note.id = stored_id
                 index_note_fts(conn, stored_id, note.title, note.body or note.content)
 
-                if note.wiki_links:
-                    process_wiki_links(conn, note)
                 if note.tags:
                     store_tags(conn, stored_id, note.tags)
 
@@ -539,6 +541,13 @@ def incremental_reindex(
                     delete_note_fts(conn, nid)
                     delete_note_by_id(conn, nid)
                     logger.info("Removed deleted note from index: %s", note["title"])
+
+        # ── Pass 2: Resolve wiki links and generate tag relationships ──
+        # Always run Pass 2 so that relationships are rebuilt even when
+        # no notes were newly reindexed (e.g. existing database with
+        # missing edges).  Both functions are idempotent.
+        resolve_all_wiki_links(conn)
+        generate_tag_relationships(conn, min_shared_tags=1)
 
         if embed:
             logger.info(

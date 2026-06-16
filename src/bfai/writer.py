@@ -7,6 +7,8 @@ Provides functions to write notes to the vault's notes directory.
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -185,6 +187,86 @@ def update_note(note: Note, content: str | None = None) -> Note:
         created_at=note.created_at,
         updated_at=datetime.now(),
     )
+
+
+def append_note(
+    note: Note,
+    content: str,
+    *,
+    section_heading: str = "## Observations",
+) -> Note:
+    """Append content to an existing markdown note atomically.
+
+    If the given ``section_heading`` does not exist at the end of the
+    file, it will be appended as a new heading line before the content.
+    The write is performed atomically using a temporary file and
+    ``os.replace()``, so a crash mid-write leaves the original intact.
+
+    Args:
+        note: The Note object to append to. Must have a valid ``path``
+            pointing to an existing ``.md`` file.
+        content: The markdown content to append.
+        section_heading: The markdown heading under which the content
+            should be grouped. Defaults to ``"## Observations"``.
+
+    Returns:
+        A new ``Note`` object representing the updated file, with
+        an updated ``updated_at`` timestamp.
+
+    Raises:
+        FileNotFoundError: If the note file does not exist on disk.
+        ValueError: If the path is not a ``.md`` file.
+    """
+    resolved = note.path.resolve()
+
+    if not resolved.exists():
+        raise FileNotFoundError(f"Note file not found: {resolved}")
+
+    if resolved.suffix.lower() != ".md":
+        raise ValueError(f"Not a markdown file: {resolved}")
+
+    # Read the existing file content
+    existing_content = resolved.read_text(encoding="utf-8")
+
+    # Build the new content by appending the section heading + content
+    stripped = existing_content.rstrip("\n")
+    if not stripped.endswith(section_heading):
+        new_body = stripped + "\n\n" + section_heading + "\n\n" + content
+    else:
+        new_body = stripped + "\n\n" + content
+
+    # Ensure trailing newline
+    new_body = new_body.rstrip("\n") + "\n"
+
+    # Atomic write via tempfile + os.replace
+    fd, tmp_path = tempfile.mkstemp(
+        dir=resolved.parent,
+        prefix=resolved.stem + "_",
+        suffix=".md.tmp",
+    )
+    try:
+        os.write(fd, new_body.encode("utf-8"))
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1  # Mark as closed
+        os.replace(tmp_path, resolved)
+    except Exception:
+        # Clean up temp file on failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
+
+    logger.info("Appended to note: %s (heading=%s)", note.title, section_heading)
+
+    # Reload the note to get fresh parsing
+    return load_note(resolved)
 
 
 def delete_note(note: Note | str) -> None:

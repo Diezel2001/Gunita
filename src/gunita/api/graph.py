@@ -67,6 +67,7 @@ class GraphNode(BaseModel):
     path: str
     tags: list[str] = []
     degree: int = 0
+    chunk_count: int = 0
 
 
 class GraphEdge(BaseModel):
@@ -95,6 +96,10 @@ def _build_graph_data(
     include_edges_between: set[str] | None = None,
 ) -> tuple[list[GraphNode], list[GraphEdge]]:
     """Build graph nodes and edges from a set of note IDs.
+
+    Applies deduplication: nodes sharing the same path are merged
+    (the first encountered note_id is kept). Edges referencing
+    merged-out or non-existent nodes are filtered out.
 
     Args:
         note_ids: The note IDs to include as nodes.
@@ -146,13 +151,13 @@ def _build_graph_data(
             ))
 
     # Build nodes
-    nodes: list[GraphNode] = []
+    raw_nodes: list[GraphNode] = []
     for nid in note_ids:
         note = get_note_by_id(conn, nid)
         if not note:
             continue
         tags = get_tags_for_note(conn, nid)
-        nodes.append(GraphNode(
+        raw_nodes.append(GraphNode(
             note_id=nid,
             title=note.get("title", "") or "",
             path=note.get("path", "") or "",
@@ -160,7 +165,74 @@ def _build_graph_data(
             degree=degree_map.get(nid, 0),
         ))
 
-    return nodes, edges
+    # ── Filter out stale notes (files that no longer exist on disk) ──
+    import os as _os
+    live_nodes: list[GraphNode] = []
+    stale_ids: set[str] = set()
+    for node in raw_nodes:
+        if node.path and _os.path.isfile(node.path):
+            live_nodes.append(node)
+        else:
+            stale_ids.add(node.note_id)
+    # Use only live nodes for dedup
+    raw_nodes = live_nodes
+
+    # ── Deduplicate nodes by title (case-insensitive) ──
+    # If multiple note_ids share the same title (e.g. from old renamed directory
+    # paths), merge them into a single node.  Prefer the node whose file exists
+    # on disk (already filtered above, but belt-and-suspenders).
+    seen_titles: dict[str, GraphNode] = {}
+    merged_nodes: list[GraphNode] = []
+    merged_id_map: dict[str, str] = {}  # old_id -> kept_id (maps merged-out IDs to the survivor)
+
+    for node in raw_nodes:
+        title_key = (node.title or "").strip().lower()
+        if not title_key:
+            title_key = node.note_id  # fallback to ID
+
+        if title_key in seen_titles:
+            # Duplicate title — merge into existing
+            existing = seen_titles[title_key]
+            existing.degree = max(existing.degree, node.degree)
+            # Prefer the node with a longer (more complete) path
+            if len(node.path) > len(existing.path):
+                existing.path = node.path
+            # Merge tags
+            existing_tags_set = set(existing.tags)
+            for t in node.tags:
+                if t not in existing_tags_set:
+                    existing.tags.append(t)
+                    existing_tags_set.add(t)
+            # Record that this old note_id maps to the survivor
+            merged_id_map[node.note_id] = existing.note_id
+        else:
+            seen_titles[title_key] = node
+            merged_nodes.append(node)
+
+    # ── Remap edges ──
+    # Build set of valid (surviving) note IDs
+    valid_ids = set(n.note_id for n in merged_nodes)
+
+    # Remap source/target through merged_id_map and filter invalid
+    remapped_edges: list[GraphEdge] = []
+    seen_edge_keys: set[tuple[str, str, str]] = set()
+    for e in edges:
+        src = merged_id_map.get(e.source_id, e.source_id)
+        tgt = merged_id_map.get(e.target_id, e.target_id)
+        # Skip self-loops created by merging
+        if src == tgt:
+            continue
+        # Skip if either side no longer exists
+        if src not in valid_ids or tgt not in valid_ids:
+            continue
+        # Deduplicate remapped edges
+        edge_key = (min(src, tgt), max(src, tgt), e.rel_type)
+        if edge_key in seen_edge_keys:
+            continue
+        seen_edge_keys.add(edge_key)
+        remapped_edges.append(GraphEdge(source_id=src, target_id=tgt, rel_type=e.rel_type))
+
+    return merged_nodes, remapped_edges
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +261,20 @@ async def get_graph(
         paginated_ids = all_ids[offset:offset + limit]
 
         nodes, edges = _build_graph_data(paginated_ids, conn)
+
+        # Count chunks per note
+        chunk_counts: dict[str, int] = {}
+        try:
+            rows = conn.execute(
+                "SELECT note_id, COUNT(*) as cnt FROM chunks GROUP BY note_id"
+            ).fetchall()
+            for row in rows:
+                chunk_counts[row["note_id"]] = row["cnt"]
+        except Exception:
+            pass  # chunks table may not exist yet
+
+        for node in nodes:
+            node.chunk_count = chunk_counts.get(node.note_id, 0)
 
         return GraphResponse(
             nodes=nodes,
@@ -227,6 +313,20 @@ async def get_neighborhood(
         nodes, edges = _build_graph_data(
             note_ids, conn, include_edges_between=expanded_set,
         )
+
+        # Count chunks per node
+        chunk_counts: dict[str, int] = {}
+        try:
+            rows = conn.execute(
+                "SELECT note_id, COUNT(*) as cnt FROM chunks GROUP BY note_id"
+            ).fetchall()
+            for row in rows:
+                chunk_counts[row["note_id"]] = row["cnt"]
+        except Exception:
+            pass
+
+        for node in nodes:
+            node.chunk_count = chunk_counts.get(node.note_id, 0)
 
         return GraphResponse(
             nodes=nodes,

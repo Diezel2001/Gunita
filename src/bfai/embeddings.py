@@ -20,7 +20,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
-from bfai.config import settings, ENV_OPENAI_API_KEY
+from bfai.config import settings, ENV_EMBEDDING_PROVIDER
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -381,7 +381,8 @@ def get_provider(name: str | None = None, **kwargs: object) -> EmbeddingProvider
         ImportError: If the required package for the provider is not
             installed.
     """
-    resolved = name or settings.bfai_embedding_provider or "sentence-transformers"
+    env_name = os.environ.get(ENV_EMBEDDING_PROVIDER)
+    resolved = name or env_name or settings.bfai_embedding_provider or "sentence-transformers"
     resolved = resolved.lower().strip()
 
     provider_cls = _PROVIDER_REGISTRY.get(resolved)

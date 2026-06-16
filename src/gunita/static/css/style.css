@@ -620,3 +620,60 @@ hr { border: none; border-top: 1px solid var(--border-color); margin: 8px 0; }
     #graph-export { flex-direction: column; }
     #graph-filters { flex-direction: column; max-width: 130px; }
 }
+
+/* ─── Chunk Highlighting (preview) ─── */
+.chunk-highlight {
+    border-left: 3px solid var(--accent-blue);
+    padding: 8px 12px;
+    margin: 8px 0;
+    background: rgba(91, 123, 154, 0.08);
+    border-radius: 0 4px 4px 0;
+    scroll-margin-top: 60px;
+}
+
+.chunk-highlight-active {
+    animation: chunk-flash 2.5s ease-out;
+    background: rgba(91, 123, 154, 0.2) !important;
+}
+
+@keyframes chunk-flash {
+    0% { background: rgba(91, 123, 154, 0.4); }
+    100% { background: rgba(91, 123, 154, 0.08); }
+}
+
+/* ─── Quick Add Section ─── */
+#quick-add-section {
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid var(--accent-border);
+    border-radius: 6px;
+    background: var(--bg-primary);
+}
+
+#quick-add-input {
+    width: 100%;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--accent-border);
+    border-radius: 4px;
+    padding: 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    resize: vertical;
+    min-height: 50px;
+    box-sizing: border-box;
+}
+
+#quick-add-input:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 0 2px rgba(91, 123, 154, 0.2);
+}
+
+.quick-add-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+    justify-content: flex-end;
+}

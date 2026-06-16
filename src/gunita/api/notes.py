@@ -74,6 +74,31 @@ class NoteUpdateRequest(BaseModel):
     metadata: dict[str, str] | None = None
 
 
+class NoteAppendRequest(BaseModel):
+    """Request body for appending content to a note (PATCH)."""
+    content: str
+    section_heading: str = "## Observations"
+    tags: list[str] | None = None
+    source: str | None = None
+    source_note_id: str | None = None
+    embed: bool = False
+
+
+class ChunkSummary(BaseModel):
+    """A single chunk summary."""
+    chunk_id: str
+    chunk_index: int
+    section_heading: str
+    heading_path: list[str] = []
+    text: str
+
+
+class NoteChunksResponse(BaseModel):
+    """Chunk list for a note."""
+    note_id: str
+    chunks: list[ChunkSummary]
+
+
 class NoteCreateResponse(BaseModel):
     """Response after creating a note."""
     note_id: str
@@ -272,6 +297,56 @@ async def get_backlinks(note_id: str) -> list[BacklinkItem]:
             )
             for bl in backlinks
         ]
+    finally:
+        conn.close()
+
+
+@router.get("/{note_id}/chunks", response_model=NoteChunksResponse)
+async def get_note_chunks(note_id: str) -> NoteChunksResponse:
+    """Get all chunks for a note, ordered by chunk_index.
+
+    Returns the chunk IDs, section headings, heading paths, and text
+    for each chunk in the note. Used by the frontend to scroll to and
+    highlight specific chunks when navigating from search results.
+    """
+    import json
+    from gunita.config import settings
+    from bfai.db import connect, ensure_schema
+
+    conn = connect(settings.database_path)
+    try:
+        ensure_schema(conn)
+
+        # Verify note exists (via EFKS — neither notes nor chunks would exist)
+        rows = conn.execute(
+            """SELECT chunk_id, note_id, section_heading, heading_path, text, chunk_index
+               FROM chunks
+               WHERE note_id = ?
+               ORDER BY chunk_index""",
+            (note_id,),
+        ).fetchall()
+
+        if not rows:
+            # Note might not have chunks yet (e.g., empty note)
+            return NoteChunksResponse(note_id=note_id, chunks=[])
+
+        chunks: list[ChunkSummary] = []
+        for row in rows:
+            heading_path_raw = row["heading_path"] or "[]"
+            try:
+                heading_path = json.loads(heading_path_raw) if isinstance(heading_path_raw, str) else heading_path_raw
+            except (json.JSONDecodeError, TypeError):
+                heading_path = []
+
+            chunks.append(ChunkSummary(
+                chunk_id=row["chunk_id"],
+                chunk_index=row["chunk_index"],
+                section_heading=row["section_heading"] or "",
+                heading_path=heading_path,
+                text=row["text"] or "",
+            ))
+
+        return NoteChunksResponse(note_id=note_id, chunks=chunks)
     finally:
         conn.close()
 
@@ -488,6 +563,80 @@ async def delete_note(note_id: str) -> dict:
         db_delete_note(conn, note_id)
 
         return {"message": "Note deleted", "note_id": note_id}
+    finally:
+        conn.close()
+
+
+# ─── PATCH: Append content to a note ──────────────────────────────────
+
+@router.patch("/{note_id}", response_model=NoteDetail)
+async def append_to_note(note_id: str, req: NoteAppendRequest) -> NoteDetail:
+    """Append content to an existing note and re-index it.
+
+    Saves a version snapshot before the append, then calls
+    ``memory.observe()`` to perform the append + re-index.
+    """
+    from gunita.config import settings
+    from bfai.db import connect, ensure_schema, get_note_by_id, get_tags_for_note
+
+    conn = connect(settings.database_path)
+    try:
+        ensure_schema(conn)
+
+        note_record = get_note_by_id(conn, note_id)
+        if not note_record:
+            raise HTTPException(status_code=404, detail=f"Note {note_id} not found")
+
+        note_title = note_record.get("title", "") or ""
+        note_path = note_record.get("path", "")
+        if not note_path:
+            raise HTTPException(status_code=500, detail="Note has no file path")
+
+        file_path = Path(note_path)
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Note file not found on disk")
+
+        # Save a version snapshot before appending
+        existing_content = file_path.read_text(encoding="utf-8")
+        _save_version(file_path, existing_content)
+
+        # Call memory.observe() to perform the append + re-index
+        from bfai.memory import observe as memory_observe
+
+        try:
+            result = memory_observe(
+                title=note_title,
+                observation=req.content,
+                tags=req.tags,
+                source=req.source,
+                source_note_id=req.source_note_id,
+                auto_create=False,
+                section_heading=req.section_heading,
+                re_embed=req.embed,
+            )
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Note '{note_title}' not found (auto_create=False)",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        # Build response from updated note
+        updated_note = result["note"]
+        tags = get_tags_for_note(conn, note_id)
+        metadata = updated_note.metadata or {}
+
+        return NoteDetail(
+            note_id=note_id,
+            title=updated_note.title or note_title,
+            path=str(updated_note.path),
+            tags=tags,
+            content=updated_note.content,
+            metadata=metadata,
+            created_at=note_record.get("created_at"),
+            updated_at=datetime.now().isoformat(),
+        )
     finally:
         conn.close()
 

@@ -22,7 +22,7 @@ _MODEL_DEFAULTS: dict[str, str] = {
     "ollama": "nomic-embed-text",
 }
 
-VAULT_SUBDIRS: tuple[str, ...] = ("notes", "documents", "images")
+VAULT_SUBDIRS: tuple[str, ...] = ("notes", "documents", "images", "metadata")
 
 
 def get_vault_path() -> Path:
@@ -80,7 +80,7 @@ class Settings(BaseSettings):
 
     # ── embedding ──────────────────────────────────────────────────────
     bfai_embedding_provider: str = Field(
-        default="ollama", alias="BFAI_EMBEDDING_PROVIDER"
+        default="sentence-transformers", alias="BFAI_EMBEDDING_PROVIDER"
     )
     bfai_embedding_model: str | None = Field(
         default=None, alias="BFAI_EMBEDDING_MODEL"

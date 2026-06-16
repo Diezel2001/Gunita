@@ -5,14 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gunita — Knowledge Explorer</title>
 
-    <!-- force-graph for 2D knowledge graph visualization -->
-    <script src="https://unpkg.com/force-graph"></script>
-
-    <!-- Marked.js for markdown rendering -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-
-    <!-- DOMPurify for XSS protection -->
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+    <script src="/static/js/vendor/force-graph.min.js"></script>
+    <script src="/static/js/vendor/marked.min.js"></script>
+    <script src="/static/js/vendor/purify.min.js"></script>
 
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
@@ -93,6 +88,12 @@
                         <input type="checkbox" id="cluster-checkbox" class="filter-checkbox" />
                     </label>
                 </div>
+                <div class="graph-filter-section">
+                    <label class="graph-filter-label" id="label-toggle">
+                        <span>Node Labels</span>
+                        <input type="checkbox" id="label-checkbox" class="filter-checkbox" checked />
+                    </label>
+                </div>
             </div>
             <!-- Graph Legend -->
             <div id="graph-legend">
@@ -128,6 +129,7 @@
                 <span class="panel-title">📝 Preview</span>
                 <div id="preview-actions" style="display:none">
                     <button id="edit-note-btn" class="panel-action-btn" title="Edit note">✏️</button>
+                    <button id="quick-add-btn" class="panel-action-btn" title="Quick add snippet">➕</button>
                     <button id="version-history-btn" class="panel-action-btn" title="Version history">🕐</button>
                 </div>
             </div>
@@ -145,6 +147,14 @@
                     <div id="preview-meta"></div>
                     <hr />
                     <div id="preview-body"></div>
+                    <div id="quick-add-section" style="display:none">
+                        <hr />
+                        <textarea id="quick-add-input" placeholder="Add a quick snippet... (markdown)" spellcheck="false" rows="3"></textarea>
+                        <div class="quick-add-actions">
+                            <button id="quick-add-submit" class="editor-btn editor-btn-primary">Add</button>
+                            <button id="quick-add-cancel" class="editor-btn">Cancel</button>
+                        </div>
+                    </div>
                 </div>
                 <!-- Editor view (hidden by default) -->
                 <div id="preview-editor" style="display:none">

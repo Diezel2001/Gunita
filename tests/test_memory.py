@@ -1,7 +1,7 @@
 """Tests for the memory API module."""
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -1243,7 +1243,13 @@ class TestDeleteAPI:
             create("Embed Delete", "Content.", embed=True)
             result = delete("Embed Delete", remove_embedding=True)
             assert result["success"] is True
-            mock_remove.assert_called_once()
+            # _remove_embedding is called at least once (from delete).
+            # It may also be called inside _embed_note if embedding succeeds,
+            # but if model loading fails, only the delete call fires.
+            assert mock_remove.call_count >= 1
+            # Verify the call(s) include the delete step arguments:
+            # _remove_embedding(note_id, provider_name=None)
+            mock_remove.assert_called_with(ANY, provider_name=None)
 
     def _get_note_id(self, title: str) -> str:
         """Helper to get a note ID by title from the database."""

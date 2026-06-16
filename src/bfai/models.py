@@ -79,7 +79,9 @@ class Chunk:
         chunk_id: Unique ID for this chunk (``{note_id}_chunk_{index}``).
         text: The chunk text content (section heading + paragraph).
         note_id: The ID of the note this chunk belongs to.
-        section_heading: The markdown heading for this section.
+        section_heading: The markdown heading for this section (current heading only).
+        heading_path: Full breadcrumb path of headings from the note title
+            down to the current section, e.g. ``["Computer Vision", "CNNs", "Architecture"]``.
         chunk_index: Sequential index of this chunk within the note.
     """
 
@@ -88,3 +90,4 @@ class Chunk:
     note_id: str
     section_heading: str
     chunk_index: int
+    heading_path: list[str] = field(default_factory=list)

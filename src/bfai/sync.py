@@ -436,9 +436,20 @@ def incremental_reindex(
         delete_note_fts,
         resolve_all_wiki_links,
         generate_tag_relationships,
+        _ensure_chunks_schema,
+        delete_chunk_fts,
+        index_chunk_fts,
     )
     from bfai.loader import load_note
     from bfai.parser import parse_note
+    from bfai.memory import chunk_note
+
+    # Pre-initialise the embedding provider once to avoid reloading
+    # the model for every note.
+    _embedding_provider = None
+    if embed:
+        from bfai.embeddings import get_provider
+        _embedding_provider = get_provider(name=provider_name)
 
     notes_dir = _notes_dir()
     if not notes_dir.exists():
@@ -450,6 +461,7 @@ def incremental_reindex(
     conn = connect(db_path)
     try:
         ensure_schema(conn)
+        _ensure_chunks_schema(conn)
 
         # Get current file snapshots
         current_files = _snapshot_dir(notes_dir)
@@ -499,6 +511,12 @@ def incremental_reindex(
                 note.id = stored_id
                 index_note_fts(conn, stored_id, note.title, note.body or note.content)
 
+                # Index chunks into chunks_fts for chunk-level search
+                chunks = chunk_note(note)
+                delete_chunk_fts(conn, stored_id)
+                for chunk in chunks:
+                    index_chunk_fts(conn, chunk)
+
                 if note.tags:
                     store_tags(conn, stored_id, note.tags)
 
@@ -508,7 +526,7 @@ def incremental_reindex(
                 if embed:
                     try:
                         from bfai.memory import _embed_note
-                        _embed_note(note, provider_name=provider_name)
+                        _embed_note(note, provider=_embedding_provider)
                         embedded += 1
                     except Exception as embed_exc:
                         logger.warning(

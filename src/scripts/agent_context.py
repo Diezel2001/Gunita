@@ -8,7 +8,7 @@ from bfai.memory import retrieve, search
 
 def get_agent_context(
     query: str,
-    top_k: int = 10,
+    top_k: int = 5,
     max_hops: int = 2,
     include_backlinks: bool = True,
     use_hybrid: bool = True,

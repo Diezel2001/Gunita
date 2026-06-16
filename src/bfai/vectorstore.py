@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,11 +76,15 @@ class VectorStore:
         url: str | None = None,
         collection: str | None = None,
         dimension: int = 384,
+        client: object | None = None,
     ) -> None:
         self._url = url or self._resolve_url()
         self._collection = collection or self._resolve_collection()
         self._dimension = dimension
-        self._client = self._connect()
+        if client is not None:
+            self._client = client
+        else:
+            self._client = self._connect()
 
     @staticmethod
     def _resolve_url() -> str:
@@ -118,6 +123,28 @@ class VectorStore:
                 "qdrant-client is not installed. "
                 "Install it with: pip install qdrant-client"
             ) from exc
+
+    @staticmethod
+    def _coerce_point_id(id_str: str) -> str:
+        """Convert arbitrary string IDs to valid Qdrant point IDs.
+
+        Qdrant v1.12+ only accepts unsigned integers or UUIDs as point
+        IDs.  Chunk IDs like ``{note_id}_chunk_{n}`` are not valid UUIDs,
+        so we convert them deterministically via ``uuid.uuid5``.
+
+        Args:
+            id_str: The original point ID string (e.g. a chunk ID).
+
+        Returns:
+            A canonical UUID string (e.g. ``"550e8400-e29b-41d4-a716-446655440000"``).
+        """
+        # Already a canonical UUID (with dashes) — return as-is
+        try:
+            return str(uuid.UUID(id_str))
+        except ValueError:
+            pass
+        # Derive a deterministic UUID v5 from the string
+        return str(uuid.uuid5(uuid.NAMESPACE_DNS, id_str))
 
     def _connect(self) -> Any:
         """Create a Qdrant client connection."""
@@ -195,7 +222,7 @@ class VectorStore:
             payload.update(metadata)
 
         point = PointStruct(
-            id=note_id,
+            id=self._coerce_point_id(note_id),
             vector=vector,
             payload=payload,
         )
@@ -238,7 +265,11 @@ class VectorStore:
             if metadata_list and i < len(metadata_list):
                 payload.update(metadata_list[i])
             points.append(
-                PointStruct(id=note_id, vector=vectors[i], payload=payload)
+                PointStruct(
+                    id=self._coerce_point_id(note_id),
+                    vector=vectors[i],
+                    payload=payload,
+                )
             )
 
         try:
@@ -273,16 +304,16 @@ class VectorStore:
         try:
             kwargs: dict[str, Any] = {
                 "collection_name": self._collection,
-                "query_vector": query_vector,
+                "query": query_vector,
                 "limit": top_k,
             }
             if score_threshold is not None:
                 kwargs["score_threshold"] = score_threshold
 
-            results = self._client.search(**kwargs)
+            results = self._client.query_points(**kwargs)
 
             search_results = []
-            for hit in results:
+            for hit in results.points:
                 payload = hit.payload or {}
                 search_results.append(
                     SearchResult(
@@ -315,7 +346,7 @@ class VectorStore:
         try:
             self._client.delete(
                 collection_name=self._collection,
-                points_selector=note_ids,
+                points_selector=[self._coerce_point_id(nid) for nid in note_ids],
             )
             logger.info("Deleted %d vector(s)", len(note_ids))
             return len(note_ids)

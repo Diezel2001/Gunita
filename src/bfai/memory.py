@@ -389,6 +389,8 @@ def retrieve(
 
         for r in search_results:
             note_id = r["note_id"]
+            if note_id in seen_ids:
+                continue
             seen_ids.add(note_id)
 
             context.append({
@@ -615,6 +617,7 @@ def semantic_search(
     *,
     provider_name: str | None = None,
     vector_store: object | None = None,
+    score_threshold: float | None = None,
 ) -> list[dict]:
     """Search for similar memories using semantic embeddings.
 
@@ -632,6 +635,9 @@ def semantic_search(
         vector_store: An optional :class:`bfai.vectorstore.VectorStore`
             instance. If ``None``, one is created using
             ``BFAI_QDRANT_URL`` / ``BFAI_QDRANT_COLLECTION`` env vars.
+        score_threshold: Optional minimum similarity score (cosine
+            distance). Results below this threshold are discarded.
+            ``None`` (default) means no filtering.
 
     Returns:
         List of dicts with keys ``note_id``, ``score``, ``title``,
@@ -655,8 +661,15 @@ def semantic_search(
 
     # Request extra results to account for multiple chunks per note
     fetch_k = top_k * 5
-    logger.info("Searching vector store (top_k=%d, fetch=%d)", top_k, fetch_k)
-    results = vector_store.search(query_vector, top_k=fetch_k)
+    logger.info(
+        "Searching vector store (top_k=%d, fetch=%d, score_threshold=%s)",
+        top_k, fetch_k, score_threshold,
+    )
+    results = vector_store.search(
+        query_vector,
+        top_k=fetch_k,
+        score_threshold=score_threshold,
+    )
 
     # Return all chunk-level results (no dedup by note_id) for rich context
     chunk_results: list[dict] = []
@@ -686,12 +699,21 @@ def hybrid_search(
     keyword_weight: float = 0.3,
     semantic_weight: float = 0.7,
     provider_name: str | None = None,
+    semantic_threshold: float | None = None,
+    keyword_threshold: float | None = None,
 ) -> list[dict]:
     """Hybrid search combining keyword (FTS5) and semantic (vector) search.
 
     Runs keyword search and semantic search in parallel, normalises their
     scores to a common [0, 1] scale, merges and deduplicates results, and
     returns them ranked by combined score.
+
+    Each search type is independently filtered by its own threshold before
+    merging.  This means only keyword results whose normalised score is
+    >= ``keyword_threshold`` and only semantic results whose raw score
+    is >= ``semantic_threshold`` will be included.  The threshold acts as
+    a pre-filter per search type, so a low score in one does not drag
+    down the combined results.
 
     If the vector store or embedding provider fails (e.g. Qdrant is not
     running), the function falls back to keyword-only results.
@@ -708,6 +730,12 @@ def hybrid_search(
             (e.g. ``"openai"``, ``"ollama"``, ``"sentence-transformers"``).
             If ``None``, uses the ``BFAI_EMBEDDING_PROVIDER`` env var
             or the default provider.
+        semantic_threshold: Minimum raw semantic similarity score
+            (cosine distance). Results below this are discarded before
+            merging. ``None`` (default) means no filtering.
+        keyword_threshold: Minimum normalised keyword score [0, 1].
+            Results below this are discarded before merging.
+            ``None`` (default) means no filtering.
 
     Returns:
         List of result dicts with keys:
@@ -736,6 +764,7 @@ def hybrid_search(
             query,
             top_k=top_k,
             provider_name=provider_name,
+            score_threshold=semantic_threshold,
         )
     except (ImportError, RuntimeError) as exc:
         logger.warning("Semantic search unavailable, falling back to keyword-only: %s", exc)
@@ -756,7 +785,11 @@ def hybrid_search(
                 normalised = (max_rank - (r.get("rank", 0) or 0)) / (max_rank - min_rank)
             else:
                 normalised = 1.0
-            keyword_scores[nid] = max(0.0, min(1.0, normalised))
+            # Apply keyword threshold filter
+            kw_score = max(0.0, min(1.0, normalised))
+            if keyword_threshold is not None and kw_score < keyword_threshold:
+                continue
+            keyword_scores[nid] = kw_score
 
     # Step 4: Build a lookup of note_id → semantic scores
     semantic_scores: dict[str, float] = {}
@@ -765,7 +798,8 @@ def hybrid_search(
         max_score = max(scores_list) if scores_list else 1.0
         for r in semantic_results:
             nid = r["note_id"]
-            semantic_scores[nid] = (r.get("score", 0) or 0) / max_score if max_score > 0 else 0.0
+            sem_score = (r.get("score", 0) or 0) / max_score if max_score > 0 else 0.0
+            semantic_scores[nid] = sem_score
 
     # Step 5: Merge all note IDs
     all_ids = list(keyword_scores.keys() | semantic_scores.keys())
@@ -1554,6 +1588,8 @@ def _split_paragraphs(text: str) -> list[str]:
 def _embed_note(
     note: Note,
     provider_name: str | None = None,
+    *,
+    provider: object | None = None,
 ) -> None:
     """Chunk a note, generate embeddings for each chunk, and store them.
 
@@ -1563,18 +1599,26 @@ def _embed_note(
 
     Args:
         note: The Note to embed.
-        provider_name: Optional embedding provider name.
+        provider_name: Optional embedding provider name (ignored if
+            ``provider`` is given).
+        provider: An optional pre-initialised embedding provider
+            instance.  If ``None`` (default), one is created via
+            :func:`get_provider`.
 
     Raises:
         ImportError: If the embedding provider or Qdrant client is not
             installed.
         RuntimeError: If embedding generation or storage fails.
     """
-    from bfai.embeddings import get_provider
+    from bfai.embeddings import get_provider as _get_provider
     from bfai.vectorstore import VectorStore
 
-    provider = get_provider(name=provider_name)
+    if provider is None:
+        provider = _get_provider(name=provider_name)
     store = VectorStore(dimension=provider.embedding_dimension)
+
+    # Ensure the Qdrant collection exists before any operations
+    store.ensure_collection(dimension=provider.embedding_dimension)
 
     # Remove old chunks before embedding new ones
     _remove_embedding(note.id)

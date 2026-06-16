@@ -270,7 +270,9 @@ class TestSearch:
         hit2.id = "n2"
         hit2.score = 0.82
         hit2.payload = {"title": "Robot", "tags": ["ai"]}
-        client.search.return_value = [hit1, hit2]
+        query_response = MagicMock()
+        query_response.points = [hit1, hit2]
+        client.query_points.return_value = query_response
         store = _make_vectorstore(client)
         results = store.search([0.1, 0.2, 0.3, 0.4], top_k=5)
         assert len(results) == 2
@@ -283,25 +285,29 @@ class TestSearch:
     def test_search_empty(self):
         """Should return empty list when no results."""
         client = MagicMock()
-        client.search.return_value = []
+        query_response = MagicMock()
+        query_response.points = []
+        client.query_points.return_value = query_response
         store = _make_vectorstore(client)
         results = store.search([0.1, 0.2, 0.3, 0.4])
         assert results == []
 
     def test_search_with_threshold(self):
-        """Should pass score_threshold to client.search."""
+        """Should pass score_threshold to client.query_points."""
         client = MagicMock()
-        client.search.return_value = []
+        query_response = MagicMock()
+        query_response.points = []
+        client.query_points.return_value = query_response
         store = _make_vectorstore(client)
         store.search([0.1, 0.2, 0.3, 0.4], score_threshold=0.5)
-        client.search.assert_called_once()
-        call_kwargs = client.search.call_args[1]
+        client.query_points.assert_called_once()
+        call_kwargs = client.query_points.call_args[1]
         assert call_kwargs["score_threshold"] == 0.5
 
     def test_search_error(self):
         """Should raise RuntimeError on search failure."""
         client = MagicMock()
-        client.search.side_effect = Exception("connection failed")
+        client.query_points.side_effect = Exception("connection failed")
         store = _make_vectorstore(client)
         with pytest.raises(RuntimeError, match="Vector search failed"):
             store.search([0.1, 0.2, 0.3, 0.4])

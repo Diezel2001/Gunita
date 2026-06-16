@@ -12,6 +12,7 @@ GitOps is an operational framework that uses Git as the single source of truth f
 - The **desired state** is declared in a Git repository
 - An operator (ArgoCD) **reconciles** actual state to match
 - All changes go through **pull requests**
+s
 
 ## Benefits
 

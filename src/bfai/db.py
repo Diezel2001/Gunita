@@ -1184,8 +1184,12 @@ def rebuild_fts_index(
 def _sanitize_fts5_query(query: str) -> str:
     """Sanitize a user-provided FTS5 search query to prevent crashes.
 
-    Escapes or removes characters and patterns that would cause
-    ``sqlite3.OperationalError``:
+    For natural-language-like queries (sentences with stop words), the
+    query is first processed through keyword extraction (KeyBERT) to
+    extract meaningful keywords, which are then joined with ``OR`` for
+    FTS5 matching.
+
+    Then the query is further sanitised to prevent crashes from:
     - Unmatched double quotes (``"``)
     - Bare boolean operators (``AND``, ``OR``, ``NOT``) at start/end
     - Unbalanced parentheses
@@ -1201,6 +1205,12 @@ def _sanitize_fts5_query(query: str) -> str:
 
     # Strip whitespace
     q = query.strip()
+
+    # Extract keywords for natural language queries (sentences)
+    from bfai.keywords import extract_keywords as _extract_keywords
+    q = _extract_keywords(q)
+    if not q or not q.strip():
+        return ""
 
     # Escape unbalanced double quotes: FTS5 requires paired quotes.
     # Count quotes; if odd, append a closing quote.

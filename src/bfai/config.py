@@ -20,6 +20,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _MODEL_DEFAULTS: dict[str, str] = {
     "openai": "text-embedding-3-small",
     "ollama": "nomic-embed-text",
+    "sentence-transformers": "all-MiniLM-L6-v2",
 }
 
 VAULT_SUBDIRS: tuple[str, ...] = ("notes", "documents", "images", "metadata")

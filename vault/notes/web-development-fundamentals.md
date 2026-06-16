@@ -20,6 +20,7 @@ Core concepts for building modern web applications.
 - WebSocket servers for real-time communication
 - Server-Sent Events for streaming data
 
+
 ## Real-Time Communication
 
 The [[ESP32-S3 Robot Controller]] uses **WebSockets** for bidirectional control, similar to how web dashboards receive live updates.

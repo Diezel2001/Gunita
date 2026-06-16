@@ -472,7 +472,8 @@ class TestRetrieve:
 
     def test_retrieve_no_results(self):
         """retrieve with no matches should return empty list."""
-        results = retrieve("nonexistent")
+        with patch("bfai.memory._semantic_chunk_search", return_value=[]):
+            results = retrieve("nonexistent")
         assert results == []
 
     def test_retrieve_expands_with_backlinks(self, _clean_vault):
@@ -711,14 +712,13 @@ class TestSemanticSearch:
 
     def _make_vectorstore(self, mock_client, collection="test_col", dimension=4):
         """Create a VectorStore with a mocked QdrantClient."""
-        with patch("bfai.vectorstore.VectorStore._connect") as mock_connect:
-            mock_connect.return_value = mock_client
-            from bfai.vectorstore import VectorStore
-            store = VectorStore(
-                url="http://localhost:6333",
-                collection=collection,
-                dimension=dimension,
-            )
+        from bfai.vectorstore import VectorStore
+        store = VectorStore(
+            url="http://localhost:6333",
+            collection=collection,
+            dimension=dimension,
+            client=mock_client,
+        )
         return store
 
     def test_semantic_search_basic(self):
@@ -728,7 +728,9 @@ class TestSemanticSearch:
         hit.id = "n1"
         hit.score = 0.95
         hit.payload = {"title": "ESP32 Robotics"}
-        mock_client.search.return_value = [hit]
+        query_response = MagicMock()
+        query_response.points = [hit]
+        mock_client.query_points.return_value = query_response
 
         store = self._make_vectorstore(mock_client)
 
@@ -748,7 +750,9 @@ class TestSemanticSearch:
     def test_semantic_search_empty(self):
         """semantic_search should return empty list when no results."""
         mock_client = MagicMock()
-        mock_client.search.return_value = []
+        query_response = MagicMock()
+        query_response.points = []
+        mock_client.query_points.return_value = query_response
 
         store = self._make_vectorstore(mock_client)
 
@@ -772,7 +776,9 @@ class TestSemanticSearch:
         hit2.id = "n2"
         hit2.score = 0.82
         hit2.payload = {"title": "Robotics", "tags": ["ai"]}
-        mock_client.search.return_value = [hit1, hit2]
+        query_response = MagicMock()
+        query_response.points = [hit1, hit2]
+        mock_client.query_points.return_value = query_response
 
         store = self._make_vectorstore(mock_client)
 
@@ -792,7 +798,9 @@ class TestSemanticSearch:
     def test_semantic_search_generates_embedding(self):
         """semantic_search should generate an embedding for the query."""
         mock_client = MagicMock()
-        mock_client.search.return_value = []
+        query_response = MagicMock()
+        query_response.points = []
+        mock_client.query_points.return_value = query_response
 
         store = self._make_vectorstore(mock_client)
 
@@ -809,7 +817,9 @@ class TestSemanticSearch:
     def test_semantic_search_passes_provider_name(self):
         """semantic_search should pass provider_name to get_provider."""
         mock_client = MagicMock()
-        mock_client.search.return_value = []
+        query_response = MagicMock()
+        query_response.points = []
+        mock_client.query_points.return_value = query_response
 
         store = self._make_vectorstore(mock_client)
 
@@ -830,7 +840,9 @@ class TestSemanticSearch:
         hit.id = "n1"
         hit.score = 0.9
         hit.payload = {"title": "Test"}
-        mock_client.search.return_value = [hit]
+        query_response = MagicMock()
+        query_response.points = [hit]
+        mock_client.query_points.return_value = query_response
 
         store = self._make_vectorstore(mock_client)
 

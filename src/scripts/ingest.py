@@ -28,6 +28,14 @@ def ingest_directory(
     print(f"Found {len(md_files)} markdown files in {vault}")
 
     ensure_vault(vault_path)
+
+    # Pre-initialise the embedding provider once (avoid reloading model
+    # for each note).
+    _embedding_provider = None
+    if embed:
+        from bfai.embeddings import get_provider
+        _embedding_provider = get_provider(name=provider_name)
+
     success = 0
     embedded = 0
     for f in md_files:
@@ -47,7 +55,7 @@ def ingest_directory(
                     note.id = note_id
                     note.title = parsed.title
                     note.body = parsed.body
-                    _embed_note(note, provider_name=provider_name)
+                    _embed_note(note, provider=_embedding_provider)
                     embedded += 1
                 except Exception as exc:
                     print(f"  ⚠ {f.name} — embedding failed: {exc}")

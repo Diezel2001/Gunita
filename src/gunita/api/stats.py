@@ -56,7 +56,6 @@ async def get_stats() -> VaultStats:
         ensure_schema,
         get_all_note_ids,
         get_all_tags,
-        get_relationships_for_note,
     )
 
     vault_path = settings.vault_path
@@ -67,12 +66,10 @@ async def get_stats() -> VaultStats:
         note_ids = get_all_note_ids(conn)
         notes_count = len(note_ids)
 
-        # Count relationships (each direction counted separately by the query,
-        # so divide by 2 to avoid double-counting)
-        total_rel_rows = sum(
-            len(get_relationships_for_note(conn, nid)) for nid in note_ids
-        )
-        relationships_count = total_rel_rows // 2 if total_rel_rows > 0 else 0
+        # Count relationships directly from the DB (avoids double-counting
+        # issues with directed relationships like OBSERVED_FROM).
+        row = conn.execute("SELECT COUNT(*) AS cnt FROM relationships").fetchone()
+        relationships_count = row["cnt"] if row else 0
 
         # Tags: count unique tags across all notes
         all_tags = get_all_tags(conn)
@@ -86,42 +83,39 @@ async def get_stats() -> VaultStats:
         files_on_disk = 0
         if notes_dir.exists():
             files_on_disk = len(list(notes_dir.glob("*.md")))
-
+    finally:
         conn.close()
 
-        # Qdrant check + vector count
-        qdrant_ok = False
-        vector_count = 0
-        try:
-            import httpx
-            r = httpx.get(f"{settings.qdrant_url}/collections", timeout=2.0)
-            qdrant_ok = r.status_code == 200
-            if qdrant_ok:
-                collections = r.json().get("result", {}).get("collections", [])
-                for coll in collections:
-                    collection_name = os.environ.get("BFAI_QDRANT_COLLECTION", "bfai")
-                    if coll.get("name") == collection_name:
-                        info = httpx.get(
-                            f"{settings.qdrant_url}/collections/{coll['name']}",
-                            timeout=2.0,
-                        )
-                        if info.status_code == 200:
-                            vector_count = info.json().get("result", {}).get("points_count", 0) or 0
-        except Exception:
-            pass
-
-        return VaultStats(
-            notes_count=notes_count,
-            relationships_count=relationships_count,
-            tags_count=tags_count,
-            files_on_disk=files_on_disk,
-            unindexed_count=max(0, files_on_disk - notes_count),
-            qdrant_connected=qdrant_ok,
-            vector_count=vector_count,
-        )
+    # Qdrant check + vector count (no DB connection needed, outside try)
+    qdrant_ok = False
+    vector_count = 0
+    try:
+        import httpx
+        r = httpx.get(f"{settings.qdrant_url}/collections", timeout=2.0)
+        qdrant_ok = r.status_code == 200
+        if qdrant_ok:
+            collections = r.json().get("result", {}).get("collections", [])
+            for coll in collections:
+                collection_name = os.environ.get("BFAI_QDRANT_COLLECTION", "bfai")
+                if coll.get("name") == collection_name:
+                    info = httpx.get(
+                        f"{settings.qdrant_url}/collections/{coll['name']}",
+                        timeout=2.0,
+                    )
+                    if info.status_code == 200:
+                        vector_count = info.json().get("result", {}).get("points_count", 0) or 0
     except Exception:
-        conn.close()
-        raise
+        pass
+
+    return VaultStats(
+        notes_count=notes_count,
+        relationships_count=relationships_count,
+        tags_count=tags_count,
+        files_on_disk=files_on_disk,
+        unindexed_count=max(0, files_on_disk - notes_count),
+        qdrant_connected=qdrant_ok,
+        vector_count=vector_count,
+    )
 
 
 @router.post("/reindex", response_model=ReindexResult)

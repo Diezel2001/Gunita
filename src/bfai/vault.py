@@ -47,6 +47,11 @@ def ensure_vault(vault_path: Path | str | None = None) -> Path:
 def get_vault() -> Path:
     """Get the vault path without ensuring it exists.
 
+    Re-reads from the environment on every call so callers that set
+    ``BFAI_VAULT_PATH`` at runtime (e.g. the writer module or tests)
+    are honoured. For most purposes the ``settings.vault_path`` property
+    should be used instead.
+
     Returns:
         Path to the vault root directory.
     """

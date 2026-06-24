@@ -112,7 +112,7 @@ class SentenceTransformerProvider(EmbeddingProvider):
     def __init__(self, model_name: str | None = None) -> None:
         self._model_name = model_name or settings.embedding_model or "all-MiniLM-L6-v2"
         self._model = self._load_model()
-        self._dimension: int = self._model.get_embedding_dimension() or 384
+        self._dimension: int = self._model.get_sentence_embedding_dimension() or 384
         logger.info(
             "Initialised SentenceTransformerProvider: model=%s, dim=%d",
             self._model_name,

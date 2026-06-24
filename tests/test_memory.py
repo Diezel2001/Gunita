@@ -32,11 +32,28 @@ from bfai.vault import get_vault
 
 @pytest.fixture(autouse=True)
 def _clean_vault(monkeypatch, tmp_path):
-    """Redirect the vault to a temporary directory for each test."""
+    """Redirect the vault to a temporary directory for each test.
+
+    This fixture:
+    1. Creates a temp vault directory with a ``notes`` subdirectory.
+    2. Sets ``BFAI_VAULT_PATH`` env var so that ``get_vault()`` and
+       ``os.getenv("BFAI_VAULT_PATH")`` resolve to the temp directory.
+    3. Overrides ``settings.bfai_vault_path`` so that ``settings.database_path``
+       (used by ``connect()`` / ``init_db()``) also points into the temp dir.
+
+    Without step 3, all tests share the same real ``bfai.db``, causing
+    ``UNIQUE constraint`` failures and other cross-test pollution.
+    """
+    from bfai.config import settings
+
     vault_dir = tmp_path / "vault"
     vault_dir.mkdir(parents=True, exist_ok=True)
     (vault_dir / "notes").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("BFAI_VAULT_PATH", str(vault_dir))
+    # Override the cached settings singleton so ›database_path‹ resolves to
+    # a temp path instead of the real vault (pydantic-settings BaseSettings
+    # caches values at import time and does NOT re-read the env var).
+    settings.bfai_vault_path = vault_dir
     return vault_dir
 
 

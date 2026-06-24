@@ -15,7 +15,6 @@ is actually used. Import errors are raised lazily.
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -88,13 +87,29 @@ class VectorStore:
 
     @staticmethod
     def _resolve_url() -> str:
-        """Resolve Qdrant URL from settings or default."""
-        return os.environ.get("BFAI_QDRANT_URL", "http://localhost:6333")
+        """Resolve Qdrant URL from env, settings, or default.
+
+        Checks runtime ``os.environ`` first (so that tests which
+        patch the environment at runtime work), then falls back to
+        the cached ``Settings`` singleton, then the hard-coded
+        default.
+        """
+        import os
+        return (
+            os.environ.get("BFAI_QDRANT_URL")
+            or settings.bfai_qdrant_url
+            or "http://localhost:6333"
+        )
 
     @staticmethod
     def _resolve_collection() -> str:
-        """Resolve Qdrant collection name from settings or default."""
-        return os.environ.get("BFAI_QDRANT_COLLECTION", "bfai")
+        """Resolve Qdrant collection name from env, settings, or default."""
+        import os
+        return (
+            os.environ.get("BFAI_QDRANT_COLLECTION")
+            or settings.bfai_qdrant_collection
+            or "bfai"
+        )
 
     @staticmethod
     def _import_client():

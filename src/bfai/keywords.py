@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from bfai.config import settings
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -20,10 +22,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _KEYBERT_MODEL: Any = None  # Singleton KeyBERT instance
+_KEYBERT_MODEL_NAME: str = ""  # Model name used to create the singleton
 
 
 def _get_keybert() -> Any:
     """Lazily import and return the KeyBERT model singleton.
+
+    The underlying SentenceTransformer model is resolved from the
+    ``BFAI_EMBEDDING_MODEL`` environment variable (or its fallback chain),
+    so it stays in sync with the embedding model used elsewhere.
 
     Returns:
         A ``KeyBERT`` instance, or ``None`` if keybert is not installed.
@@ -31,10 +38,15 @@ def _get_keybert() -> Any:
     Raises:
         ImportError: If ``keybert`` is not installed.
     """
-    global _KEYBERT_MODEL
-    if _KEYBERT_MODEL is not None:
+    global _KEYBERT_MODEL, _KEYBERT_MODEL_NAME
+
+    model_name = settings.embedding_model
+
+    # Return cached singleton if the model hasn't changed
+    if _KEYBERT_MODEL is not None and _KEYBERT_MODEL_NAME == model_name:
         return _KEYBERT_MODEL
 
+    # Reinitialise if the model setting changed (or first call)
     try:
         from keybert import KeyBERT  # type: ignore[import-untyped]
     except ImportError as exc:
@@ -43,11 +55,13 @@ def _get_keybert() -> Any:
         ) from exc
 
     try:
-        _KEYBERT_MODEL = KeyBERT(model="all-MiniLM-L6-v2")
-        logger.info("Initialised KeyBERT model: all-MiniLM-L6-v2")
+        _KEYBERT_MODEL = KeyBERT(model=model_name)
+        _KEYBERT_MODEL_NAME = model_name
+        logger.info("Initialised KeyBERT model: %s", model_name)
     except Exception as exc:
         logger.warning("Failed to initialise KeyBERT: %s", exc)
         _KEYBERT_MODEL = None
+        _KEYBERT_MODEL_NAME = ""
 
     return _KEYBERT_MODEL
 

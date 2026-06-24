@@ -15,6 +15,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from bfai.config import settings
 from bfai.models import Note, Chunk
 from bfai.vault import get_vault
 
@@ -95,11 +96,11 @@ RANK_WEIGHT_RESERVED = 0.20
 def get_db_path() -> Path:
     """Return the path to the SQLite database file.
 
-    The database is stored as ``bfai.db`` inside the vault's metadata
-    directory.
+    Resolves via ``settings.database_path`` which respects the
+    ``BFAI_DB_PATH`` environment variable or falls back to
+    ``<vault>/metadata/bfai.db``.
     """
-    vault = get_vault()
-    return vault / "metadata" / "bfai.db"
+    return settings.database_path
 
 
 def connect(db_path: Path | None = None) -> sqlite3.Connection:

@@ -7,7 +7,6 @@ are kept for backward compatibility.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import ClassVar
 
@@ -24,12 +23,6 @@ _MODEL_DEFAULTS: dict[str, str] = {
 }
 
 VAULT_SUBDIRS: tuple[str, ...] = ("notes", "documents", "images", "metadata")
-
-
-def get_vault_path() -> Path:
-    """Return the absolute vault path from env or default."""
-    raw = os.getenv("BFAI_VAULT_PATH", str(Path.cwd() / "vault"))
-    return Path(raw).expanduser().resolve()
 
 
 # Legacy env-var name constants (for introspection / backward compat).
@@ -55,6 +48,19 @@ ENV_GUNITA_RELOAD = "GUNITA_RELOAD"
 ENV_GUNITA_GRAPH_MAX_NODES = "GUNITA_GRAPH_MAX_NODES"
 ENV_GUNITA_API_KEY = "GUNITA_API_KEY"
 ENV_GUNITA_EXTRA_VAULTS = "GUNITA_EXTRA_VAULTS"
+
+
+def get_vault_path() -> Path:
+    """Return the absolute vault path from env or default.
+
+    Re-reads from the environment on every call so that scripts which
+    set ``BFAI_VAULT_PATH`` at runtime (e.g. tests) are honoured.
+    For most purposes the ``settings.vault_path`` property should be
+    used instead, which reads from the cached ``Settings`` singleton.
+    """
+    import os
+    raw = os.getenv("BFAI_VAULT_PATH", str(Path.cwd() / "vault"))
+    return Path(raw).expanduser().resolve()
 
 
 # ── Settings class  ──────────────────────────────────────────────────────
@@ -105,6 +111,12 @@ class Settings(BaseSettings):
     bfai_chunk_overlap: int = Field(default=50, alias="BFAI_CHUNK_OVERLAP")
     bfai_chunk_by_lines: bool = Field(default=True, alias="BFAI_CHUNK_BY_LINES")
 
+    # ── Qdrant Vector Database ─────────────────────────────────────────
+    bfai_qdrant_url: str = Field(
+        default="http://localhost:6333", alias="BFAI_QDRANT_URL"
+    )
+    bfai_qdrant_collection: str = Field(default="bfai", alias="BFAI_QDRANT_COLLECTION")
+
     # ── Gunita ─────────────────────────────────────────────────────────
     gunita_host: str = Field(default="0.0.0.0", alias="GUNITA_HOST")
     gunita_port: int = Field(default=8080, alias="GUNITA_PORT")
@@ -141,15 +153,19 @@ class Settings(BaseSettings):
         return [str(p) for p in self.extra_vaults_list]
 
     @property
-    def qdrant_url(self) -> str:
-        """Backward‑compat Qdrant URL (read from env or default)."""
-        import os
-        return os.environ.get("BFAI_QDRANT_URL", "http://localhost:6333")
-
-    @property
     def graph_max_nodes(self) -> int:
         """Alias for ``gunita_graph_max_nodes`` (backward compat)."""
         return self.gunita_graph_max_nodes
+
+    @property
+    def qdrant_url(self) -> str:
+        """Alias for ``bfai_qdrant_url`` (backward compat)."""
+        return self.bfai_qdrant_url
+
+    @property
+    def qdrant_collection(self) -> str:
+        """Alias for ``bfai_qdrant_collection`` (backward compat)."""
+        return self.bfai_qdrant_collection
 
     # ── computed / resolved properties ──────────────────────────────────
 
@@ -205,44 +221,11 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# ── backward-compatible module-level constants  ──────────────────────────
-
-VAULT_PATH: Path = settings.vault_path
-DATABASE_PATH: Path = settings.database_path
-EMBEDDING_MODEL: str = settings.embedding_model
-EMBEDDING_PROVIDER: str = settings.bfai_embedding_provider
-EMBEDDING_BATCH_SIZE: int = settings.bfai_embedding_batch_size
-EMBEDDING_DIMENSIONS: int = settings.bfai_embedding_dimensions
-OLLAMA_BASE_URL: str = settings.ollama_base_url
-OPENAI_API_KEY: str = settings.openai_api_key
-SYNC_INTERVAL: int = settings.bfai_sync_interval
-SYNC_BATCH_SIZE: int = settings.bfai_sync_batch_size
-SYNC_MAX_WORKERS: int = settings.bfai_sync_max_workers
-CHUNK_SIZE: int = settings.bfai_chunk_size
-CHUNK_OVERLAP: int = settings.bfai_chunk_overlap
-CHUNK_BY_LINES: bool = settings.bfai_chunk_by_lines
-
 # ── export helpers  ──────────────────────────────────────────────────────
 __all__ = [
     "Settings",
     "settings",
     "VAULT_SUBDIRS",
-    "get_vault_path",
-    "VAULT_PATH",
-    "DATABASE_PATH",
-    "EMBEDDING_MODEL",
-    "EMBEDDING_PROVIDER",
-    "EMBEDDING_BATCH_SIZE",
-    "EMBEDDING_DIMENSIONS",
-    "OLLAMA_BASE_URL",
-    "OPENAI_API_KEY",
-    "SYNC_INTERVAL",
-    "SYNC_BATCH_SIZE",
-    "SYNC_MAX_WORKERS",
-    "CHUNK_SIZE",
-    "CHUNK_OVERLAP",
-    "CHUNK_BY_LINES",
-    # Env-var name constants
     "ENV_VAULT_PATH",
     "ENV_DB_PATH",
     "ENV_EMBEDDING_MODEL",

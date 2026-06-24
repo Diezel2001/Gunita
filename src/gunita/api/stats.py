@@ -7,7 +7,6 @@ POST /api/stats/reindex    — Trigger incremental reindex
 from __future__ import annotations
 
 import logging
-import os
 import time
 
 from fastapi import APIRouter, Query
@@ -96,7 +95,7 @@ async def get_stats() -> VaultStats:
         if qdrant_ok:
             collections = r.json().get("result", {}).get("collections", [])
             for coll in collections:
-                collection_name = os.environ.get("BFAI_QDRANT_COLLECTION", "bfai")
+                collection_name = settings.bfai_qdrant_collection
                 if coll.get("name") == collection_name:
                     info = httpx.get(
                         f"{settings.qdrant_url}/collections/{coll['name']}",
